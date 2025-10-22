@@ -3,9 +3,12 @@ from typing import Any, Dict, Iterable, List, Optional, Literal
 from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, Field
+from abc import ABC, abstractmethod
 from .clocks import now_utc as _now
 
-SCHEMA_VERSION = "v2"  # steps are lists; append_* auto-finalizes via .end()
+
+SCHEMA_VERSION = "v2"
+
 
 class StepStatus(str, Enum):
     PENDING = "PENDING"
@@ -14,33 +17,88 @@ class StepStatus(str, Enum):
     FAILED  = "FAILED"
     SKIPPED = "SKIPPED"
 
+
 class Check(BaseModel):
     name: str
     ok: bool
     detail: Optional[str] = None
 
-class StepReport(BaseModel):
+
+class ReviewFlag(BaseModel):
+    flagged: bool = False
+    reason: Optional[str] = None
+
+
+class ReportBase(BaseModel, ABC):
+    status: StepStatus = StepStatus.PENDING
+    percent: int = 0
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    notes: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    review: ReviewFlag = Field(default_factory=ReviewFlag)
+    report_version: str = SCHEMA_VERSION
+
+    def start(self) -> "ReportBase":
+        self.status = StepStatus.RUNNING
+        if not self.started_at:
+            self.started_at = _now()
+        return self
+
+    def succeed(self) -> "ReportBase":
+        self.status = StepStatus.SUCCESS
+        self.percent = 100
+        self.finished_at = _now()
+        return self
+
+    def fail(self, message: Optional[str] = None) -> "ReportBase":
+        self.status = StepStatus.FAILED
+        if message:
+            self.errors.append(message)
+        self.finished_at = _now()
+        return self
+
+    def skip(self, reason: Optional[str] = None) -> "ReportBase":
+        self.status = StepStatus.SKIPPED
+        if reason:
+            self.notes.append(f"Skipped: {reason}")
+        self.finished_at = _now()
+        return self
+
+    def request_review(self, reason: str | None = None) -> "ReportBase":
+        self.review = ReviewFlag(flagged=True, reason=reason)
+        return self
+
+    def clear_review(self) -> "ReportBase":
+        self.review = ReviewFlag()
+        return self
+
+    @property
+    def requires_human_review(self) -> bool:
+        return bool(self.review.flagged)
+
+    @property
+    @abstractmethod
+    def ok(self) -> bool:
+        """Concrete subclasses decide what 'ok' means."""
+
+    def end(self) -> "ReportBase":
+        if self.status in (StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED):
+            if not self.finished_at:
+                self.finished_at = _now()
+            return self
+        return self.succeed() if self.ok else self.fail("One or more checks failed" if self.errors or hasattr(self, "checks") else "Step failed")
+
+
+class StepReport(ReportBase):
     """
     One unit of work (e.g., 'parse', 'analyze'). Designed to be JSON-serialized.
     """
     id: str
     label: Optional[str] = None
-    status: StepStatus = StepStatus.PENDING
-    percent: int = 0  # 0..100
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
     checks: List[Check] = Field(default_factory=list)
-    notes: List[str] = Field(default_factory=list)
-    errors: List[str] = Field(default_factory=list)
-    warnings: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    report_version: str = SCHEMA_VERSION
-
-    def start(self) -> "StepReport":
-        self.status = StepStatus.RUNNING
-        if not self.started_at:
-            self.started_at = _now()
-        return self
 
     @classmethod
     def begin(cls, id: str, *, label: str | None = None, **meta) -> "StepReport":
@@ -57,41 +115,8 @@ class StepReport(BaseModel):
     def add_check(self, name: str, ok: bool, detail: Optional[str] = None) -> None:
         self.checks.append(Check(name=name, ok=ok, detail=detail))
 
-    def succeed(self) -> "StepReport":
-        self.status = StepStatus.SUCCESS
-        self.percent = 100
-        self.finished_at = _now()
-        return self
 
-    def fail(self, message: Optional[str] = None) -> "StepReport":
-        self.status = StepStatus.FAILED
-        if message:
-            self.errors.append(message)
-        self.finished_at = _now()
-        return self
-
-    def skip(self, reason: Optional[str] = None) -> "StepReport":
-        self.status = StepStatus.SKIPPED
-        if reason:
-            self.notes.append(f"Skipped: {reason}")
-        self.finished_at = _now()
-        return self
-
-    def end(self) -> "StepReport":
-        """
-        Idempotent finalize:
-        - Terminal → ensure finished_at set; return self.
-        - Otherwise → succeed if ok else fail with a generic message.
-        """
-        if self.status in (StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED):
-            if not self.finished_at:
-                self.finished_at = _now()
-            return self
-        return self.succeed() if self.ok else self.fail(
-            "One or more checks failed" if self.checks else "Step failed"
-        )
-
-class FileReport(BaseModel):
+class FileReport(ReportBase):
     """
     Per-document aggregation with its own ordered sequence of steps.
     """
@@ -100,40 +125,29 @@ class FileReport(BaseModel):
     name: str | None = None
     size_bytes: int | None = None
     mime_type: str | None = None
-
-    status: StepStatus = StepStatus.PENDING
-    percent: int = 0
-    started_at: Optional[datetime] = None
-    finished_at: Optional[datetime] = None
-
     steps: List[StepReport] = Field(default_factory=list)
-
-    notes: List[str] = Field(default_factory=list)
-    errors: List[str] = Field(default_factory=list)
-    warnings: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    report_version: str = SCHEMA_VERSION
-
-    def start(self) -> "FileReport":
-        self.status = StepStatus.RUNNING
-        if not self.started_at:
-            self.started_at = _now()
-        return self
 
     @classmethod
     def begin(cls, file_id: str, **meta) -> "FileReport":
         return cls(file_id=file_id, **meta).start()
 
-    @property
-    def ok(self) -> bool:
-        if self.status == StepStatus.FAILED or self.errors:
-            return False
-        if self.status == StepStatus.SUCCESS:
-            return True
-        return all(s.ok for s in self.steps) if self.steps else True
+    def append_step(self, step: StepReport) -> "FileReport":
+        """Finalize the step via end(), append, recompute percent, and return self (chainable)."""
+        step.end()
+        self.steps.append(step)
+        self._recompute_percent()
+        # roll-up HITL review if you added ReviewFlag earlier
+        if getattr(step, "review", None) and step.review.flagged and not getattr(self, "review", None).flagged:
+            self.review = type(step.review)(flagged=True, reason=step.review.reason or f"Step '{step.id}' requested review")
+        return self
 
-    def append_step(self, step: StepReport) -> StepReport:
-        step.end()                     # auto-finalize
+    def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
+        """
+        Convenience: construct StepReport.begin(...), append it, and return the StepReport.
+        Great when you need the step object to update metadata mid-callers.
+        """
+        step = StepReport.begin(id, label=label, **meta)
+        step.end()
         self.steps.append(step)
         self._recompute_percent()
         return step
@@ -148,29 +162,21 @@ class FileReport(BaseModel):
             return self
         return self.succeed() if self.ok else self.fail("One or more file steps failed")
 
-    def succeed(self) -> "FileReport":
-        self.status = StepStatus.SUCCESS
-        self.percent = 100
-        self.finished_at = _now()
-        return self
-
-    def fail(self, message: Optional[str] = None) -> "FileReport":
-        self.status = StepStatus.FAILED
-        if message:
-            self.errors.append(message)
-        self.finished_at = _now()
-        return self
-
-    def skip(self, reason: Optional[str] = None) -> "FileReport":
-        self.status = StepStatus.SKIPPED
-        if reason:
-            self.notes.append(f"Skipped: {reason}")
-        self.finished_at = _now()
-        return self
+    @property
+    def ok(self) -> bool:
+        # Failure wins
+        if self.status == StepStatus.FAILED or self.errors:
+            return False
+        # Explicit success wins
+        if self.status == StepStatus.SUCCESS:
+            return True
+        # Otherwise roll up from steps (if any)
+        return all(s.ok for s in self.steps) if self.steps else True
 
     def _recompute_percent(self) -> None:
         if self.steps:
             self.percent = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
+
 
 class PipelineReport(BaseModel):
     """
@@ -193,17 +199,23 @@ class PipelineReport(BaseModel):
         self.message = message
         self.updated_at = _now()
 
-    def append_step(self, step: StepReport) -> StepReport:
-        step.end()                     # auto-finalize
+    def append_step(self, step: StepReport) -> "PipelineReport":
+        step.end()
+        self.steps.append(step)
+        self.updated_at = _now()
+        return self
+
+    def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
+        step = StepReport.begin(id, label=label, **meta).end()
         self.steps.append(step)
         self.updated_at = _now()
         return step
 
-    def append_file(self, fr: FileReport) -> FileReport:
-        fr.end()                       # auto-finalize
+    def append_file(self, fr: FileReport) -> "PipelineReport":
+        fr.end()
         self.files.append(fr)
         self.updated_at = _now()
-        return fr
+        return self
 
     def last_step(self) -> StepReport | None:
         return self.steps[-1] if self.steps else None
@@ -218,4 +230,3 @@ class PipelineReport(BaseModel):
             return
         pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
         self.set_progress(self.stage or "steps", pct, self.message or "")
-
