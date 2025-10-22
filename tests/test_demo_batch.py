@@ -57,9 +57,9 @@ def test_demo_batch_processing(tmp_path: Path):
     # Write JSON (atomic) and read back for sanity
     out = tmp_path / "progress.json"
     dump_report(out, report)
+    dump_report(Path('./tests/test_output.json'), report)
 
     data = json.loads(out.read_text())
-
     # Basic shape checks
     assert data["batch_id"] == 101
     assert data["kind"] == "process"
