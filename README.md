@@ -1,153 +1,129 @@
 # pipeline-watcher
 
-Tiny, framework-free models for **batch / per-file / per-step reporting** that serialize cleanly to JSON.
-Perfect for pipelines that want a single `progress.json` the UI can poll.
+A tiny Python package for monitoring and reporting pipeline progress, designed for
+AI/ML and document-processing workflows. It gives you lightweight, JSON-serializable
+reports at the **batch**, **file**, and **step** level, suitable for UI dashboards
+or simple log inspection.
 
-- **Simple models:** `PipelineReport`, `FileReport`, `StepReport`
-- **Ordered steps:** append-only lists (no dict keying)
-- **Uniform end():** finalize steps/files without branching
-- **No heavy deps:** just Pydantic v2
-- **Atomic writes:** helper to safely write JSON for polling UIs
+## Key Concepts
 
-## Install
+### Abstract Base
 
-```bash
-pip install pipeline-watcher
-```
+Both `StepReport` and `FileReport` share a common design philosophy: they represent
+units of work with a `status`, timestamps, percent complete, notes, errors, and
+arbitrary metadata.
 
-(Or in your project: add `pipeline-watcher` to your requirements and `pip install -e .` for local dev.)
+If you want to enforce this consistently, you can define an abstract base (e.g.,
+`ReportBase(abc.ABC)`) that declares the minimal interface:
 
-## Quick start
+- `ok: bool` property (indicates success/failure/needs review)
+- `end()` method (auto-finalize the object)
 
-```python
-from pathlib import Path
-from pipeline_watcher import StepReport, FileReport, PipelineReport, dump_report
-
-report = PipelineReport(batch_id=123, kind="process")
-report.set_progress("discover", 10, "Scanning files…")
-
-for doc in docs:  # your iterable of documents
-    fr = FileReport.begin(file_id=str(doc.id), path=doc.relpath, name=doc.name)
-
-    fr.append_step(StepReport.begin("parse",   label="Parse"))
-    fr.append_step(StepReport.begin("analyze", label="Analyze").succeed())
-
-    report.append_file(fr)
-
-report.recompute_overall_from_steps()
-dump_report(Path("reports/progress.json"), report)
-```
-
-### Why it’s useful
-- Append a step with `append_step()` — it **auto-finalizes** via `step.end()`.
-- Need explicit control? You can still call `succeed()`, `fail()`, `skip()` on a step or file.
-- Keep a single JSON file for your UI; no Django or pandas required.
-
-## Core concepts
-
-- **StepReport**: a unit of work (`id`, `label`, `status`, `percent`, `checks`, `metadata`).
-- **FileReport**: per-document aggregation (`file_id`, ordered `steps`, roll-up `percent/status`).
-- **PipelineReport**: batch container with top-level banner (`stage`, `percent`, `message`), plus
-  ordered batch `steps` and a list of `files`.
-
-All three use **ISO timestamps** and are Pydantic v2 models. `SCHEMA_VERSION` is currently `"v2"`.
-
-## JSON shape (example, truncated)
-
-```json
-{
-  "batch_id": 123,
-  "kind": "process",
-  "stage": "analyze",
-  "percent": 65,
-  "message": "13/20 analyzed",
-  "updated_at": "2025-10-22T18:05:13.421000+00:00",
-  "report_version": "v2",
-  "steps": [
-    {
-      "id": "discover",
-      "label": "Discover files",
-      "status": "SUCCESS",
-      "percent": 100,
-      "started_at": "2025-10-22T18:01:00.102000+00:00",
-      "finished_at": "2025-10-22T18:01:02.993000+00:00",
-      "checks": [],
-      "notes": [],
-      "errors": [],
-      "warnings": [],
-      "metadata": {},
-      "report_version": "v2"
-    }
-  ],
-  "files": [
-    {
-      "file_id": "42",
-      "path": "inputs/42.txt",
-      "name": "42.txt",
-      "status": "SUCCESS",
-      "percent": 100,
-      "steps": [
-        {"id":"parse","status":"SUCCESS","percent":100,"report_version":"v2"},
-        {"id":"analyze","status":"SUCCESS","percent":100,"report_version":"v2"}
-      ],
-      "report_version": "v2"
-    }
-  ]
-}
-```
-
-## API (most used)
-
-```python
-from pipeline_watcher import (
-  SCHEMA_VERSION, StepStatus, Check,
-  StepReport, FileReport, PipelineReport,
-  atomic_write_json, dump_report, now_utc
-)
-```
+This way, `StepReport`, `FileReport`, or any future specialized report classes all
+share the same contract.
 
 ### StepReport
-- `StepReport.begin(id: str, *, label: str | None = None, **meta) -> StepReport`
-- `step.add_check(name, ok, detail=None) -> None`
-- `step.end() -> StepReport`  # finalize (idempotent)
-- `step.succeed()/fail(msg=None)/skip(reason=None) -> StepReport`
-- Properties: `status`, `percent`, `checks`, `errors`, `metadata`, `ok`
+
+Represents a single processing step (e.g. "validate_index").
+
+- Tracks `status`, `checks`, `notes`, `errors`, `warnings`, `metadata`.
+- Helper methods: `start()`, `succeed()`, `fail()`, `skip()`, `end()`.
+- Convenience property: `ok` for truthy success.
 
 ### FileReport
-- `FileReport.begin(file_id: str, **meta) -> FileReport`
-- `file.append_step(step: StepReport) -> StepReport`  *(auto calls `step.end()`)*  
-- `file.end()/succeed()/fail()/skip() -> FileReport`
-- `file.percent` auto-averages step percents (simple default)
+
+Represents the processing of a single file.
+
+- Has metadata: `file_id`, `path`, `name`, `size_bytes`, `mime_type`.
+- Tracks ordered list of `StepReport`s.
+- Rolls up progress and status from its steps.
+- Chainable methods: `append_step(step)`.
+
+#### Convenience Methods
+
+FileReport also includes helpers for common patterns:
+
+- `add_completed_step(label, note=None, metadata=None)`  
+  Quickly add a SUCCESS step.
+
+- `add_failed_step(label, reason=None, metadata=None)`  
+  Quickly add a FAILED step.
+
+- `add_skipped_step(label, reason=None, metadata=None)`  
+  Quickly add a SKIPPED step.
+
+- `add_review_step(label, reason=None, metadata=None, mark_success=True)`  
+  Add a step that flags HITL (human-in-the-loop) review. By default it marks the
+  step as SUCCESS but requests review.
+
+All these helpers return `self` so you can chain them like a mini log:
+
+```python
+fr = FileReport.begin(file_id="42", path="inputs/doc1.docx")
+fr.add_completed_step("Verified file exists")\
+  .add_review_step("Low OCR confidence", reason="score=0.42")\
+  .add_failed_step("Render PDF", reason="timeout")
+```
+
+### HITL / Review Flag
+
+AI pipelines often require human-in-the-loop review. `add_review_step()` makes this explicit.
+
+```python
+fr = FileReport.begin(file_id="f2", path="inputs/b.docx", name="b.docx")
+
+# Step completed successfully, but flagged for review
+fr.add_review_step("Check OCR quality", reason="OCR confidence = 0.42")
+
+# Later in templates or UI code
+for step in fr.steps:
+    if step.review.flagged:
+        print(f"Step '{step.label}' requires human review: {step.review.reason}")
+```
 
 ### PipelineReport
-- `PipelineReport(batch_id: int, kind: Literal["validation","process"])`
-- `report.set_progress(stage, percent, message="") -> None`
-- `report.append_step(step) -> StepReport`  *(auto calls `step.end()`)*  
-- `report.append_file(file) -> FileReport`  *(auto calls `file.end()`)*  
-- `report.recompute_overall_from_steps() -> None` (mean of step percents)
 
-### I/O helpers
-- `dump_report(path: Path, report) -> None` (atomic JSON write)
-- `atomic_write_json(path: Path, data: dict) -> None`
+Represents a whole batch (validation or processing).
 
-## Versioning
+- Contains ordered batch-level `StepReport`s.
+- Optionally contains `FileReport`s for per-file detail.
+- Top-banner fields: `stage`, `percent`, `message`, `updated_at`.
+- Append-only design: `append_step()` and `append_file()`.
 
-`SCHEMA_VERSION = "v2"` indicates **steps are lists** and append auto-finalizes via `end()`.
+## Persistence
 
-If you later change the JSON schema, bump `SCHEMA_VERSION` and gate your UI parser if needed.
+- JSON-friendly: use `.model_dump_json(indent=2)`.
+- For atomic writes, write to a temp file then replace the target.
 
-## FAQ
+```python
+from pipeline_watcher import dump_report
 
-**Q: Do I need to call `succeed()` or `fail()`?**  
-A: Not usually. Call `append_step(step)` or `append_file(file)` and they’ll finalize via `end()`.
+dump_report("reports/progress.json", report)
+```
 
-**Q: How is percent computed?**  
-A: For `FileReport`, it’s the simple mean of its step percents. For the batch, call
-`recompute_overall_from_steps()` (simple mean). You can compute your own and call `set_progress()`.
+Or send to stdout:
 
-**Q: Timezones?**  
-A: All stamps use `now_utc()` — UTC with offset.
+```python
+print(report.model_dump_json(indent=2))
+```
 
-## License
+## Example
 
-MIT
+```python
+from pipeline_watcher import PipelineReport, FileReport, StepReport, dump_report
+
+# Create a batch report
+report = PipelineReport(batch_id=101, kind="process")
+report.set_progress("discover", 10, "Scanning files…")
+
+# Add batch-level step
+report.append_step(StepReport.begin("discover", label="Discover").succeed())
+
+# Add file reports
+fr = FileReport.begin(file_id="f1", path="inputs/a.docx", name="a.docx")
+fr.add_completed_step("Verified file exists")
+report.append_file(fr)
+
+# Persist
+dump_report("reports/progress.json", report)
+```
