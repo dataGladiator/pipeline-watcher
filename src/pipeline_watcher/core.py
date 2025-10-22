@@ -4,10 +4,17 @@ from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, Field
 from abc import ABC, abstractmethod
+import re
 from .clocks import now_utc as _now
 
 
 SCHEMA_VERSION = "v2"
+
+
+def _slugify(s: str) -> str:
+    s = re.sub(r"\s+", "-", s.strip().lower())
+    s = re.sub(r"[^a-z0-9\-]+", "", s)
+    return s
 
 
 class StepStatus(str, Enum):
@@ -177,6 +184,87 @@ class FileReport(ReportBase):
         if self.steps:
             self.percent = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
 
+    def _make_unique_step_id(self, label: str) -> str:
+        base = _slugify(label) or "step"
+        existing = {s.id for s in self.steps}
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base}-{i}" in existing:
+            i += 1
+        return f"{base}-{i}"
+
+    def add_completed_step(
+        self,
+        label: str,
+        *,
+        id: str | None = None,
+        note: str | None = None,
+        metadata: dict | None = None,
+    ) -> "FileReport":
+        """Create a SUCCESS step with `label`, append via append_step(), and return self."""
+        sid = id or self._make_unique_step_id(label)
+        step = StepReport.begin(sid, label=label)
+        if metadata:
+            step.metadata.update(metadata)
+        if note:
+            step.notes.append(note)
+        step.succeed()  # terminal; append_step will end() again idempotently
+        return self.append_step(step)
+
+    def add_failed_step(
+        self,
+        label: str,
+        *,
+        id: str | None = None,
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> "FileReport":
+        """Create a FAILED step and append it (chainable)."""
+        sid = id or self._make_unique_step_id(label)
+        step = StepReport.begin(sid, label=label)
+        if metadata:
+            step.metadata.update(metadata)
+        step.fail(reason)
+        return self.append_step(step)
+
+    def add_skipped_step(
+        self,
+        label: str,
+        *,
+        id: str | None = None,
+        reason: str | None = None,
+        metadata: dict | None = None,
+    ) -> "FileReport":
+        """Create a SKIPPED step and append it (chainable)."""
+        sid = id or self._make_unique_step_id(label)
+        step = StepReport.begin(sid, label=label)
+        if metadata:
+            step.metadata.update(metadata)
+        step.skip(reason)
+        return self.append_step(step)
+
+    def add_review_step(
+        self,
+        label: str,
+        *,
+        id: str | None = None,
+        reason: str | None = None,
+        metadata: dict | None = None,
+        mark_success: bool = True,
+    ) -> "FileReport":
+        """
+        Create a step that flags Human-In-The-Loop review, then append.
+        By default we mark it SUCCESS (common pattern: 'passed but needs review').
+        """
+        sid = id or self._make_unique_step_id(label)
+        step = StepReport.begin(sid, label=label).request_review(reason)
+        if metadata:
+            step.metadata.update(metadata)
+        if mark_success:
+            step.succeed()
+        # If your append_step rolls review up to the FileReport, that'll happen there.
+        return self.append_step(step)
 
 class PipelineReport(BaseModel):
     """
