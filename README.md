@@ -1,9 +1,51 @@
 # pipeline-watcher
 
-A tiny Python package for monitoring and reporting pipeline progress, designed for
-AI/ML and document-processing workflows. It gives you lightweight, JSON-serializable
-reports at the **batch**, **file**, and **step** level, suitable for UI dashboards
-or simple log inspection.
+`pipeline-watcher` is a lightweight alternative to traditional logging for **AI/ML
+pipelines**. Instead of unstructured logs, it gives you **structured JSON reports**
+that can be dropped directly into a UI (for example via Jinja2 templates or a
+dashboard frontend).
+
+Think of it as *logs that the UI can read*. Each batch, file, and step produces
+JSON with consistent fields, ready to be rendered in your web app.
+
+## Demo (Quick Glance)
+
+```python
+from pipeline_watcher import PipelineReport, FileReport, StepReport, dump_report
+
+# Create a batch report
+report = PipelineReport(batch_id=42, kind="process")
+report.set_progress("load", 5, "Loading input files…")
+
+# Add a batch-level step
+report.append_step(StepReport.begin("load", label="Load inputs").succeed())
+
+# Add a file report with quick steps (fluent, log-like)
+fr = FileReport.begin(file_id="f1", path="inputs/data.csv", name="data.csv")
+fr.add_completed_step("Verified file exists")\
+  .add_review_step("Check class balance", reason="Minor skew detected")\
+  .add_failed_step("Feature extraction", reason="NaN values found")
+report.append_file(fr)
+
+# Persist to disk for the UI to pick up
+dump_report("reports/progress.json", report)
+```
+
+Yields `reports/progress.json`:
+
+```json
+{
+  "batch_id": 42,
+  "kind": "process",
+  "stage": "load",
+  "percent": 5,
+  "message": "Loading input files…",
+  "steps": [...],
+  "files": [...]
+}
+```
+
+---
 
 ## Key Concepts
 
@@ -41,22 +83,12 @@ Represents the processing of a single file.
 
 #### Convenience Methods
 
-FileReport also includes helpers for common patterns:
+FileReport includes helpers for common patterns (all return `self` for chaining):
 
-- `add_completed_step(label, note=None, metadata=None)`  
-  Quickly add a SUCCESS step.
-
-- `add_failed_step(label, reason=None, metadata=None)`  
-  Quickly add a FAILED step.
-
-- `add_skipped_step(label, reason=None, metadata=None)`  
-  Quickly add a SKIPPED step.
-
-- `add_review_step(label, reason=None, metadata=None, mark_success=True)`  
-  Add a step that flags HITL (human-in-the-loop) review. By default it marks the
-  step as SUCCESS but requests review.
-
-All these helpers return `self` so you can chain them like a mini log:
+- `add_completed_step(label, note=None, metadata=None)` – quickly add a SUCCESS step.  
+- `add_failed_step(label, reason=None, metadata=None)` – quickly add a FAILED step.  
+- `add_skipped_step(label, reason=None, metadata=None)` – quickly add a SKIPPED step.  
+- `add_review_step(label, reason=None, metadata=None, mark_success=True)` – flag HITL (human-in-the-loop) review; by default the step is SUCCESS but requests review.
 
 ```python
 fr = FileReport.begin(file_id="42", path="inputs/doc1.docx")
@@ -90,6 +122,59 @@ Represents a whole batch (validation or processing).
 - Top-banner fields: `stage`, `percent`, `message`, `updated_at`.
 - Append-only design: `append_step()` and `append_file()`.
 
+---
+
+## Using with Jinja2
+
+Since reports are just Pydantic models that serialize to JSON/dicts, you can pass
+them straight to a template.
+
+### Jinja2 Template (snippet)
+
+```jinja2
+<h1>Batch {{ report.batch_id }} — {{ report.stage }}</h1>
+<p>Status: {{ report.percent }}% — {{ report.message }}</p>
+
+<ul>
+{% for f in report.files %}
+  <li>
+    File {{ f.name or f.file_id }}: {{ f.status }}
+    <ul>
+      {% for s in f.steps %}
+        <li>{{ s.label }} — {{ s.status }}
+        {% if s.review and s.review.flagged %}
+          🔎 Requires review: {{ s.review.reason }}
+        {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </li>
+{% endfor %}
+</ul>
+```
+
+### Rendered (Markdown approximation)
+
+Markdown won’t execute HTML/CSS, but here’s what the structure would look like
+when rendered in a browser (minus whatever styling you add later):
+
+```
+Batch 42 — load
+Status: 5% — Loading input files…
+
+• File data.csv: SUCCESS
+  - Verified file exists — SUCCESS
+  - Check class balance — SUCCESS (🔎 Requires review: Minor skew detected)
+  - Feature extraction — FAILED [NaN values found]
+
+• File labels.csv: SUCCESS
+  - Verified file exists — SUCCESS
+  - Analyze label coverage — SUCCESS
+  - Export artifacts — SUCCESS
+```
+
+---
+
 ## Persistence
 
 - JSON-friendly: use `.model_dump_json(indent=2)`.
@@ -105,25 +190,4 @@ Or send to stdout:
 
 ```python
 print(report.model_dump_json(indent=2))
-```
-
-## Example
-
-```python
-from pipeline_watcher import PipelineReport, FileReport, StepReport, dump_report
-
-# Create a batch report
-report = PipelineReport(batch_id=101, kind="process")
-report.set_progress("discover", 10, "Scanning files…")
-
-# Add batch-level step
-report.append_step(StepReport.begin("discover", label="Discover").succeed())
-
-# Add file reports
-fr = FileReport.begin(file_id="f1", path="inputs/a.docx", name="a.docx")
-fr.add_completed_step("Verified file exists")
-report.append_file(fr)
-
-# Persist
-dump_report("reports/progress.json", report)
 ```
