@@ -38,7 +38,7 @@ report.recompute_overall_from_steps()
 dump_report(Path("reports/progress.json"), report)
 ```
 
-### Why it’s nice
+### Why it’s useful
 - Append a step with `append_step()` — it **auto-finalizes** via `step.end()`.
 - Need explicit control? You can still call `succeed()`, `fail()`, `skip()` on a step or file.
 - Keep a single JSON file for your UI; no Django or pandas required.
