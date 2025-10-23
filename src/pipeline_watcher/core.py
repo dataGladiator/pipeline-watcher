@@ -1,10 +1,13 @@
 from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Literal
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+import time, traceback, contextvars, re
 from enum import Enum
 from datetime import datetime
 from pydantic import BaseModel, Field
-from abc import ABC, abstractmethod
-import re
+from pathlib import Path
+
 from .clocks import now_utc as _now
 
 
@@ -80,6 +83,18 @@ class ReportBase(BaseModel, ABC):
 
     def clear_review(self) -> "ReportBase":
         self.review = ReviewFlag()
+        return self
+
+    def note(self, msg: str) -> "ReportBase":
+        self.notes.append(msg)
+        return self
+
+    def warn(self, msg: str) -> "ReportBase":
+        self.warnings.append(msg)
+        return self
+
+    def error(self, msg: str) -> "ReportBase":
+        self.errors.append(msg)
         return self
 
     @property
@@ -266,6 +281,7 @@ class FileReport(ReportBase):
         # If your append_step rolls review up to the FileReport, that'll happen there.
         return self.append_step(step)
 
+
 class PipelineReport(BaseModel):
     """
     Batch-level container with an ordered list of steps and per-file reports.
@@ -280,6 +296,24 @@ class PipelineReport(BaseModel):
 
     steps: List[StepReport] = Field(default_factory=list)
     files: List[FileReport] = Field(default_factory=list)
+
+    output_path: Optional[Path] = None
+
+    def save(
+        self,
+        path: str | Path | None = None,
+        *,
+        indent: int = 2,
+        ensure_dir: bool = True,
+        encoding: str = "utf-8",
+    ) -> None:
+        """
+        Persist this report as JSON directly to disk (no temp file).
+        """
+        target = Path(path or self.output_path or "reports/progress.json")
+        if ensure_dir:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.model_dump_json(indent=indent), encoding=encoding)
 
     def set_progress(self, stage: str, percent: int, message: str = "") -> None:
         self.stage = stage
@@ -318,3 +352,153 @@ class PipelineReport(BaseModel):
             return
         pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
         self.set_progress(self.stage or "steps", pct, self.message or "")
+
+
+# --- context var to hold the "current" PipelineReport (thread/async-safe) ---
+_current_pipeline_report: contextvars.ContextVar[Optional["PipelineReport"]] = contextvars.ContextVar(
+    "_current_pipeline_report", default=None
+)
+
+@contextmanager
+def bind_pipeline(pr: "PipelineReport"):
+    """
+    Bind a PipelineReport to the current context so helpers (pipeline_step)
+    can auto-append to it without passing `pr` explicitly.
+
+    Usage:
+        with bind_pipeline(report):
+            # any pipeline_step(...) inside uses `report` by default
+            ...
+    """
+    token = _current_pipeline_report.set(pr)
+    try:
+        yield pr
+    finally:
+        _current_pipeline_report.reset(token)
+
+
+@contextmanager
+def pipeline_step(
+    pr: Optional["PipelineReport"],
+    id: str,
+    *,
+    label: str | None = None,
+    banner_stage: str | None = None,
+    banner_percent: int | None = None,
+    banner_message: str | None = None,
+    set_stage_on_enter: bool = False,
+    raise_on_exception: bool = False,
+    save_on_exception: bool = True,
+    output_path_override: str | Path | None = None,
+):
+    pr = pr or _current_pipeline_report.get()
+    st = StepReport.begin(id, label=label)
+    t0 = time.perf_counter()
+
+    if pr is not None and set_stage_on_enter:
+        pr.set_progress(stage=banner_stage or id, percent=pr.percent, message=banner_message or pr.message)
+
+    exc: BaseException | None = None
+    try:
+        yield st
+        st.end()
+    except BaseException as e:
+        exc = e
+        st.errors.append(f"{type(e).__name__}: {e}")
+        st.metadata["traceback"] = traceback.format_exc()
+        st.fail("Unhandled exception")
+    finally:
+        st.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+
+        if pr is not None:
+            try:
+                pr.append_step(st)
+                if any(v is not None for v in (banner_stage, banner_percent, banner_message)):
+                    pr.set_progress(
+                        stage=banner_stage or (pr.stage or id),
+                        percent=pr.percent if banner_percent is None else banner_percent,
+                        message=banner_message or pr.message,
+                    )
+            finally:
+                if exc and save_on_exception:
+                    try:
+                        pr.save(output_path_override or pr.output_path)
+                    except Exception as save_err:
+                        st.warnings.append(f"save failed: {save_err!r}")
+
+        if exc and raise_on_exception:
+            raise exc
+
+
+@contextmanager
+def bind_pipeline(pr: "PipelineReport"):
+    """
+    Bind a PipelineReport to the current context so helpers can auto-append to it.
+    """
+    token = _current_pipeline_report.set(pr)
+    try:
+        yield pr
+    finally:
+        _current_pipeline_report.reset(token)
+
+
+@contextmanager
+def pipeline_file(
+    pr: Optional["PipelineReport"],
+    *,
+    file_id: str,
+    path: str | None = None,
+    name: str | None = None,
+    size_bytes: int | None = None,
+    mime_type: str | None = None,
+    metadata: dict | None = None,
+    set_stage_on_enter: bool = False,
+    banner_stage: str | None = None,
+    banner_percent_on_exit: int | None = None,
+    banner_message_on_exit: str | None = None,
+    raise_on_exception: bool = False,
+    save_on_exception: bool = True,                # renamed from dump_on_exception
+    output_path_override: str | Path | None = None # renamed from dump_path_override
+):
+    pr = pr or _current_pipeline_report.get()
+
+    fr = FileReport.begin(file_id=file_id, path=path, name=name)
+    if size_bytes is not None: fr.size_bytes = size_bytes
+    if mime_type  is not None: fr.mime_type  = mime_type
+    if metadata:               fr.metadata.update(metadata)
+
+    t0 = time.perf_counter()
+
+    if pr is not None and set_stage_on_enter:
+        pr.set_progress(stage=banner_stage or (name or file_id), percent=pr.percent, message=pr.message)
+
+    exc: BaseException | None = None
+    try:
+        yield fr
+        fr.end()
+    except BaseException as e:
+        exc = e
+        fr.errors.append(f"{type(e).__name__}: {e}")
+        fr.metadata["traceback"] = traceback.format_exc()
+        fr.fail("Unhandled exception while processing file")
+    finally:
+        fr.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+
+        if pr is not None:
+            try:
+                pr.append_file(fr)
+                if banner_stage or banner_percent_on_exit is not None or banner_message_on_exit:
+                    pr.set_progress(
+                        stage=banner_stage or pr.stage,
+                        percent=pr.percent if banner_percent_on_exit is None else banner_percent_on_exit,
+                        message=banner_message_on_exit or pr.message,
+                    )
+            finally:
+                if exc and save_on_exception:
+                    try:
+                        pr.save(output_path_override or pr.output_path)
+                    except Exception as save_err:
+                        fr.warnings.append(f"save failed: {save_err!r}")
+
+        if exc and raise_on_exception:
+            raise exc
