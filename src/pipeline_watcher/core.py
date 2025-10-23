@@ -457,8 +457,8 @@ def pipeline_file(
     banner_percent_on_exit: int | None = None,
     banner_message_on_exit: str | None = None,
     raise_on_exception: bool = False,
-    save_on_exception: bool = True,                # renamed from dump_on_exception
-    output_path_override: str | Path | None = None # renamed from dump_path_override
+    save_on_exception: bool = True,
+    output_path_override: str | Path | None = None
 ):
     pr = pr or _current_pipeline_report.get()
 
@@ -470,12 +470,14 @@ def pipeline_file(
     t0 = time.perf_counter()
 
     if pr is not None and set_stage_on_enter:
-        pr.set_progress(stage=banner_stage or (name or file_id), percent=pr.percent, message=pr.message)
+        pr.set_progress(stage=banner_stage or (name or file_id),
+                        percent=pr.percent,
+                        message=pr.message)
 
     exc: BaseException | None = None
     try:
         yield fr
-        fr.end()
+        fr.succeed() # only runs if when completes successfully.
     except BaseException as e:
         exc = e
         fr.errors.append(f"{type(e).__name__}: {e}")
@@ -483,7 +485,7 @@ def pipeline_file(
         fr.fail("Unhandled exception while processing file")
     finally:
         fr.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
-
+        fr.end()
         if pr is not None:
             try:
                 pr.append_file(fr)
