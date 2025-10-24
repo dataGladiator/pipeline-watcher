@@ -1,0 +1,37 @@
+{% for f in report.files %}
+<div class="card">
+  <h3>{{ f.name or f.file_id }}</h3>
+  <p class="small muted">
+    Status: <strong class="status-{{ f.status|lower }}">{{ f.status }}</strong>
+    {% if f.review and f.review.flagged %} • <span class="chip review">🔎 {{ f.review.reason or "Review requested" }}</span>{% endif %}
+  </p>
+
+  {% if f.steps %}
+  <ol>
+    {% for st in f.steps %}
+    <li>
+      <strong>{{ st.label or st.id }}</strong>
+      — <span class="status-{{ st.status|lower }}">{{ st.status }}</span>
+      {% if st.percent is not none %}<span class="chip">{{ st.percent }}%</span>{% endif %}
+      {% if st.notes and st.notes|length %}
+        <div class="small">Notes: {{ st.notes|join("; ") }}</div>
+      {% endif %}
+      {% if st.errors and st.errors|length %}
+        <div class="small" style="color: var(--fail);">Errors: {{ st.errors|join("; ") }}</div>
+      {% endif %}
+      {% if st.warnings and st.warnings|length %}
+        <div class="small" style="color: var(--warn);">Warnings: {{ st.warnings|join("; ") }}</div>
+      {% endif %}
+      {% if st.metadata %}
+        <details><summary class="small muted">Metadata</summary>
+          <pre class="small">{{ st.metadata | tojson(indent=2) }}</pre>
+        </details>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="muted">No steps recorded for this file.</p>
+  {% endif %}
+</div>
+{% endfor %}

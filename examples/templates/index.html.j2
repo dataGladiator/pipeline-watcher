@@ -1,0 +1,8 @@
+{% extends "base.html.j2" %}
+{% block content %}
+  {% include "batch_summary.html.j2" %}
+  <div class="grid cols-2" style="margin-top: 1rem;">
+    {% include "file_table.html.j2" %}
+    {% include "file_detail.html.j2" %}
+  </div>
+{% endblock %}

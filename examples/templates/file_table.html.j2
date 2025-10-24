@@ -1,0 +1,63 @@
+<div class="card">
+  <h2>Files</h2>
+  {% if report.files %}
+  <table>
+    <thead>
+      <tr>
+        <th>File</th>
+        <th>Status</th>
+        <th>Steps</th>
+        <th>Review</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in report.files %}
+      <tr>
+        <td>
+          <div><strong>{{ f.name or f.file_id }}</strong></div>
+          <div class="small muted">
+            {% if f.path %}<code>{{ f.path }}</code>{% else %}—{% endif %}
+          </div>
+        </td>
+        <td>
+          {% set s=f.status|lower %}
+          <span class="status-{{ s }}">{{ f.status }}</span>
+          {% if f.percent is not none %}<span class="chip">{{ f.percent }}%</span>{% endif %}
+        </td>
+        <td class="small">
+          {% if f.steps %}
+            <details>
+              <summary>{{ f.steps|length }} step(s)</summary>
+              <ol class="small">
+                {% for st in f.steps %}
+                <li>
+                  <strong>{{ st.label or st.id }}</strong> — <span class="status-{{ st.status|lower }}">{{ st.status }}</span>
+                  {% if st.review and st.review.flagged %}
+                    <span class="chip review">🔎 {{ st.review.reason or "Review requested" }}</span>
+                  {% endif %}
+                  {% if st.notes and st.notes|length %}
+                    <div class="muted small">Notes: {{ st.notes|join("; ") }}</div>
+                  {% endif %}
+                </li>
+                {% endfor %}
+              </ol>
+            </details>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>
+          {% if f.review and f.review.flagged %}
+            <span class="chip review">🔎 {{ f.review.reason or "Review requested" }}</span>
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">No files recorded.</p>
+  {% endif %}
+</div>

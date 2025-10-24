@@ -1,0 +1,10 @@
+<div class="card">
+  <h2>Batch {{ report.batch_id }}</h2>
+  <p class="small muted">
+    Kind: <strong>{{ report.kind }}</strong> •
+    Stage: <strong>{{ report.stage or "n/a" }}</strong> •
+    Progress: <strong>{{ report.percent }}%</strong> •
+    Updated: <strong>{{ report.updated_at }}</strong>
+  </p>
+  {% if report.message %}<p>{{ report.message }}</p>{% endif %}
+</div>

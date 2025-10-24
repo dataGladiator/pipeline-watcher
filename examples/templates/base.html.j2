@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title or "Pipeline Report" }}</title>
+  <style>
+    :root {
+      --ok: #0a7d33;
+      --warn: #9a6700;
+      --fail: #b00020;
+      --skip: #6b7280;
+      --muted: #6b7280;
+      --bg: #f8fafc;
+      --fg: #0f172a;
+      --card: #ffffff;
+      --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    header { padding: 1rem 1.25rem; background: #111827; color: #fff; }
+    main { max-width: 1100px; margin: 1.25rem auto; padding: 0 1.25rem 2rem; }
+    h1, h2, h3 { margin: 0.2rem 0 0.6rem; }
+    .grid { display: grid; gap: 1rem; }
+    .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; }
+    .muted { color: var(--muted); }
+    .badge { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.75rem; border: 1px solid var(--border); background: #fff; }
+    .status-success { color: var(--ok); font-weight: 600; }
+    .status-failed { color: var(--fail); font-weight: 600; }
+    .status-skipped { color: var(--skip); font-weight: 600; }
+    .status-pending, .status-running { color: #0b5cab; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .chip { padding: 0.15rem 0.5rem; border-radius: 6px; border: 1px solid var(--border); font-size: 0.75rem; }
+    .chip.review { color: var(--warn); }
+    .small { font-size: 0.85rem; }
+    details > summary { cursor: pointer; }
+    code { background: #f3f4f6; padding: 0.1rem 0.25rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{{ header or "Pipeline Report" }}</h1>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
