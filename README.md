@@ -10,25 +10,56 @@ and inspect.
 
 ## Demo (Quick Glance)
 
+This shows:
+- **Comment replacement via notes** (your inline rationale becomes UI-visible).
+- **Context managers** that **handle exceptions** and **auto-finalize** records.
+- The new **`file_step`** for minimal ceremony inside a file block.
+
 ```python
-from pipeline_watcher import PipelineReport, FileReport, StepReport, dump_report
+from pipeline_watcher import (
+    PipelineReport,
+    StepReport,
+    pipeline_file,   # per-file context manager
+    file_step,       # per-step (within a file) context manager
+)
+
+def some_calculation() -> int:
+    return 123  # pretend work
 
 # Create a batch report
-report = PipelineReport(batch_id=42, kind="process")
+report = PipelineReport(batch_id=42, kind="process", output_path="reports/progress.json")
 report.set_progress("load", 5, "Loading input files…")
 
-# Add a batch-level step
-report.append_step(StepReport.begin("load", label="Load inputs").succeed())
+# The context manager will:
+# - auto-finalize the FileReport,
+# - record exceptions as FAILED with traceback,
+# - save the report immediately on error (save_on_exception=True),
+# - and (by default) NOT re-raise (raise_on_exception=False) so processing can continue.
+with pipeline_file(
+    report,
+    file_id="f1",
+    path="inputs/data.csv",
+    name="data.csv",
+    raise_on_exception=False,   # record failure and continue (default)
+    save_on_exception=True,     # save report immediately if an error occurs
+) as file_report:
 
-# Add a file report with quick steps (fluent, log-like)
-fr = FileReport.begin(file_id="f1", path="inputs/data.csv", name="data.csv")
-fr.add_completed_step("Verified file exists")\
-  .add_review_step("Check class balance", reason="Minor skew detected")\
-  .add_failed_step("Feature extraction", reason="NaN values found")
-report.append_file(fr)
+    # Option A — small block using file_step (handles end/exception/duration/append)
+    with file_step(file_report, "calc_result", label="Calculate result") as st:
+        r = some_calculation()
+        st.notes.append(f"raw result={r}")
+        if r > 100:
+            st.notes.append("result > 100 → taking branch A")
+            # ... continue branch A work (add checks, metadata, etc.) ...
+        else:
+            st.notes.append("result ≤ 100 → taking branch B")
+            # ... continue branch B work ...
 
-# Persist for the UI to pick up
-dump_report("reports/progress.json", report)
+    # Option B — quick “log line” success
+    file_report.add_completed_step("Verified file exists")
+
+# Persist (direct write to output_path)
+report.save()
 ```
 
 Yields `reports/progress.json` with a batch banner and per-file timelines.
@@ -144,10 +175,28 @@ with pipeline_file(
     risky_work()  # if this raises, fr is recorded as FAILED and report is saved
 ```
 
-Both context managers support:
-- `set_stage_on_enter` / `banner_*` to update the top banner while running.
-- `raise_on_exception` (default False) to keep going after recording failures.
-- `save_on_exception` + `output_path_override` (when using `PipelineReport.save`).
+### `file_step` (per-step inside a file)
+
+```python
+from pipeline_watcher import file_step
+
+with pipeline_file(report, file_id="f2", path="inputs/b.csv", name="b.csv") as fr:
+    with file_step(fr, "calc_result", label="Calculate result") as st:
+        r = some_calculation()
+        st.notes.append(f"raw result={r}")
+        if r > 100:
+            st.notes.append("branch A")
+            # ... do A ...
+        else:
+            st.notes.append("branch B")
+            # ... do B ...
+```
+
+All context managers support exception handling: they **record** the failure (status, error,
+traceback), **finalize** the object, and by default **do not re-raise**—so your pipeline
+can continue to the next file/step. You can opt into fail-fast with `raise_on_exception=True`.
+`pipeline_step`/`pipeline_file` also support **saving on exception** via `save_on_exception`
+and `output_path`/`output_path_override`.
 
 ### Binding (less boilerplate)
 
