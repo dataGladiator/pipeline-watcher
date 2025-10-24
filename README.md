@@ -1,12 +1,16 @@
 # pipeline-watcher
 
 `pipeline-watcher` is a lightweight alternative to traditional logging for **AI/ML
-pipelines**. Instead of unstructured logs, it emits **structured JSON reports**
-that your UI (Jinja2, React, etc.) can read directly. Think of it as
-> logs that the UI can render.
+pipelines**—with built‑in support for **HITL (Human‑In‑The‑Loop) review**.  
+Instead of unstructured logs, it emits **structured JSON reports** (batches → files → steps)
+that your UI (Jinja2, React, etc.) can render directly. Think of it as:
 
-It models **batches**, **files**, and **steps**, with JSON that’s easy to persist
-and inspect.
+> logs that the UI can read
+
+It models **batches**, **files**, and **steps**, plus optional **review flags** so you can
+surface “needs human review” right in your dashboards.
+
+---
 
 ## Demo (Quick Glance)
 
@@ -14,6 +18,7 @@ This shows:
 - iterating over a directory of PDFs,
 - **comment replacement via notes** (your inline rationale becomes UI-visible),
 - **context managers** that **handle exceptions** and **auto-finalize** records,
+- **HITL review** when OCR quality is low,
 - and the **`file_step`** helper for minimal ceremony inside a file block.
 
 ```python
@@ -31,15 +36,15 @@ report.set_progress("discover", 5, "Scanning PDF directory…")
 data_dir = "inputs/pdfs"
 
 for file_path in Path(data_dir).glob("*.pdf"):
-    # Assume you have a small wrapper with:
+    # Assume you have small helpers/wrappers with:
     #   - meta() -> dict(file_id=..., path=..., name=...)
     #   - extract_text() -> object with .text and .quality
     #   - index_text(text) -> dict with indexing info
-    pdf_wrapper = get_pdf_wrapper(file_path)  # user-provided function/class
+    pdf_wrapper = get_pdf_wrapper(file_path)  # user-provided
 
     # Context manager notes:
     # - auto-finalizes the FileReport
-    # - on exception: records FAILED + traceback, and (by default) DOES NOT re-raise
+    # - on exception: records FAILED + traceback, and (by default) does NOT re-raise
     #   so the loop continues to the next file
     # - set save_on_exception=True to save the batch JSON immediately on error
     with pipeline_file(
@@ -55,23 +60,23 @@ for file_path in Path(data_dir).glob("*.pdf"):
             st.notes.append("Performed OCR on the PDF")
             st.metadata["ocr_quality"] = extracted.quality
 
-            # Specific threshold decision:
+            # Specific threshold decision with HITL:
             if extracted.quality < 0.90:
                 st.notes.append("OCR quality below threshold (0.90) → request review")
                 file_report.add_review_step(
                     "Review OCR quality",
                     reason=f"quality={extracted.quality:.2f} < 0.90",
                     metadata={"quality": extracted.quality},
-                    mark_success=True,  # step can be 'success' but still ask for HITL review
+                    mark_success=True,  # step 'succeeds' but asks for human review
                 )
             else:
                 st.notes.append("OCR quality meets threshold")
 
         # Step 2: Indexing the extracted text (may raise; context manager records)
         with file_step(file_report, "index_text", label="Index extracted text") as st:
-            index_info = pdf_wrapper.index_text(extracted.text)
+            info = pdf_wrapper.index_text(extracted.text)
             st.notes.append("Indexed text for search")
-            st.metadata.update(index_info)
+            st.metadata.update(info)
 
         # Optional quick “log line” for bookkeeping
         file_report.add_completed_step("Verified file exists")
@@ -89,8 +94,8 @@ Yields `reports/progress.json` with a batch banner and per-file timelines.
 ### Abstract Base (optional pattern)
 
 `StepReport` and `FileReport` share a common shape (status, timestamps, percent,
-notes, errors, metadata). If you want to enforce this across custom report types,
-you can introduce an abstract base (`ReportBase(abc.ABC)`) that declares:
+notes, errors, metadata, optional review flag). If you want to enforce this across
+custom report types, you can introduce an abstract base (`ReportBase(abc.ABC)`) that declares:
 
 - `ok: bool` – whether the unit ultimately succeeded
 - `end()` – auto-finalize based on `ok`
@@ -99,7 +104,7 @@ you can introduce an abstract base (`ReportBase(abc.ABC)`) that declares:
 
 Represents a single unit of work (e.g., `"parse"`, `"validate_index"`).
 
-- Fields: `status`, `percent`, `started_at/finished_at`, `notes`, `warnings`, `errors`, `checks`, `metadata`.
+- Fields: `status`, `percent`, `started_at/finished_at`, `notes`, `warnings`, `errors`, `checks`, `metadata`, optional `review`.
 - Lifecycle: `begin()`, `start()`, `succeed()`, `fail()`, `skip()`, `end()`.
 - `ok` property determines success when `end()` is used.
 
@@ -233,11 +238,19 @@ with bind_pipeline(report):
 
 ---
 
-## Using with Jinja2
+## Jinja2 Templates (starter idea)
 
-You can pass the Pydantic models (or their dicts) straight to templates.
+You can pass the Pydantic models (or their dicts) straight to templates.  
+Consider providing templates like:
 
-### Jinja2 Template (snippet)
+```
+templates/
+├─ batch_summary.html.j2     # banner, percent, message, updated_at
+├─ file_table.html.j2        # file rows with status/HITL badges
+└─ file_detail.html.j2       # steps, notes/checks/errors per file
+```
+
+Example snippet:
 
 ```jinja2
 <h1>Batch {{ report.batch_id }} — {{ report.stage }}</h1>
@@ -247,12 +260,14 @@ You can pass the Pydantic models (or their dicts) straight to templates.
 {% for f in report.files %}
   <li>
     File {{ f.name or f.file_id }}: {{ f.status }}
+    {% if f.review and f.review.flagged %} 🔎 Review requested {% endif %}
     <ul>
       {% for s in f.steps %}
-        <li>{{ s.label }} — {{ s.status }}
-        {% if s.review and s.review.flagged %}
-          🔎 Requires review: {{ s.review.reason }}
-        {% endif %}
+        <li>
+          {{ s.label }} — {{ s.status }}
+          {% if s.review and s.review.flagged %}
+            🔎 Requires review: {{ s.review.reason }}
+          {% endif %}
         </li>
       {% endfor %}
     </ul>
@@ -261,17 +276,31 @@ You can pass the Pydantic models (or their dicts) straight to templates.
 </ul>
 ```
 
-### Rendered (Markdown approximation)
+---
 
-```
-Batch 42 — load
-Status: 5% — Loading input files…
+## Parsing JSON back into Pydantic models (reconstruct & render)
 
-• File data.csv: SUCCESS
-  - Verified file exists — SUCCESS
-  - Check class balance — SUCCESS (🔎 Requires review: Minor skew detected)
-  - Feature extraction — FAILED [NaN values found]
+To go beyond “just JSON”, reconstruct the full report object and pass it
+to templates or programmatic tooling.
+
+```python
+import json
+from pipeline_watcher import PipelineReport
+
+def load_report(path: str) -> PipelineReport:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    # Validate & construct the full object graph (PipelineReport → FileReport → StepReport)
+    return PipelineReport.model_validate(data)  # pydantic v2
+
+# Usage
+report = load_report("reports/progress.json")
+# now pass `report` directly to Jinja2 or other code
 ```
+
+If you need resilience for older schema versions, add a small migration layer before
+`model_validate()` (e.g., `if data.get("report_version") == "v1": transform(data)`).
+Pydantic will do the heavy lifting for nested models and enums.
 
 ---
 
@@ -297,7 +326,7 @@ report.save()
 - **Experiment tracking (MLflow/W&B)**: params, metrics, artifacts, and comparisons.
 - **Data validation (Great Expectations)**: formalized expectations & HTML data docs.
 
-`pipeline-watcher` stays intentionally small: append-only, JSON-first, and UI-ready.
+`pipeline-watcher` stays intentionally small: append-only, JSON-first, HITL‑aware, and UI-ready.
 
 ---
 
