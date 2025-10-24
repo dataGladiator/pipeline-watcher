@@ -11,54 +11,72 @@ and inspect.
 ## Demo (Quick Glance)
 
 This shows:
-- **Comment replacement via notes** (your inline rationale becomes UI-visible).
-- **Context managers** that **handle exceptions** and **auto-finalize** records.
-- The new **`file_step`** for minimal ceremony inside a file block.
+- iterating over a directory of PDFs,
+- **comment replacement via notes** (your inline rationale becomes UI-visible),
+- **context managers** that **handle exceptions** and **auto-finalize** records,
+- and the **`file_step`** helper for minimal ceremony inside a file block.
 
 ```python
+from pathlib import Path
 from pipeline_watcher import (
     PipelineReport,
-    StepReport,
     pipeline_file,   # per-file context manager
     file_step,       # per-step (within a file) context manager
 )
 
-def some_calculation() -> int:
-    return 123  # pretend work
-
 # Create a batch report
 report = PipelineReport(batch_id=42, kind="process", output_path="reports/progress.json")
-report.set_progress("load", 5, "Loading input files…")
+report.set_progress("discover", 5, "Scanning PDF directory…")
 
-# The context manager will:
-# - auto-finalize the FileReport,
-# - record exceptions as FAILED with traceback,
-# - save the report immediately on error (save_on_exception=True),
-# - and (by default) NOT re-raise (raise_on_exception=False) so processing can continue.
-with pipeline_file(
-    report,
-    file_id="f1",
-    path="inputs/data.csv",
-    name="data.csv",
-    raise_on_exception=False,   # record failure and continue (default)
-    save_on_exception=True,     # save report immediately if an error occurs
-) as file_report:
+data_dir = "inputs/pdfs"
 
-    # Option A — small block using file_step (handles end/exception/duration/append)
-    with file_step(file_report, "calc_result", label="Calculate result") as st:
-        r = some_calculation()
-        st.notes.append(f"raw result={r}")
-        if r > 100:
-            st.notes.append("result > 100 → taking branch A")
-            # ... continue branch A work (add checks, metadata, etc.) ...
-        else:
-            st.notes.append("result ≤ 100 → taking branch B")
-            # ... continue branch B work ...
+for file_path in Path(data_dir).glob("*.pdf"):
+    # Assume you have a small wrapper with:
+    #   - meta() -> dict(file_id=..., path=..., name=...)
+    #   - extract_text() -> object with .text and .quality
+    #   - index_text(text) -> dict with indexing info
+    pdf_wrapper = get_pdf_wrapper(file_path)  # user-provided function/class
 
-    # Option B — quick “log line” success
-    file_report.add_completed_step("Verified file exists")
+    # Context manager notes:
+    # - auto-finalizes the FileReport
+    # - on exception: records FAILED + traceback, and (by default) DOES NOT re-raise
+    #   so the loop continues to the next file
+    # - set save_on_exception=True to save the batch JSON immediately on error
+    with pipeline_file(
+        report,
+        **pdf_wrapper.meta(),
+        raise_on_exception=False,   # record error and continue (default)
+        save_on_exception=True,     # save report immediately on failure
+    ) as file_report:
 
-# Persist (direct write to output_path)
+        # Step 1: OCR / text extraction
+        with file_step(file_report, "extract_text", label="Extract text (OCR)") as st:
+            extracted = pdf_wrapper.extract_text()
+            st.notes.append("Performed OCR on the PDF")
+            st.metadata["ocr_quality"] = extracted.quality
+
+            # Specific threshold decision:
+            if extracted.quality < 0.90:
+                st.notes.append("OCR quality below threshold (0.90) → request review")
+                file_report.add_review_step(
+                    "Review OCR quality",
+                    reason=f"quality={extracted.quality:.2f} < 0.90",
+                    metadata={"quality": extracted.quality},
+                    mark_success=True,  # step can be 'success' but still ask for HITL review
+                )
+            else:
+                st.notes.append("OCR quality meets threshold")
+
+        # Step 2: Indexing the extracted text (may raise; context manager records)
+        with file_step(file_report, "index_text", label="Index extracted text") as st:
+            index_info = pdf_wrapper.index_text(extracted.text)
+            st.notes.append("Indexed text for search")
+            st.metadata.update(index_info)
+
+        # Optional quick “log line” for bookkeeping
+        file_report.add_completed_step("Verified file exists")
+
+# Persist the whole batch report (direct write to output_path)
 report.save()
 ```
 
