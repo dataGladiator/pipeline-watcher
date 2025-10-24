@@ -14,6 +14,34 @@ from .clocks import now_utc as _now
 SCHEMA_VERSION = "v2"
 
 
+def _norm_text(s: str | None) -> str:
+    return "" if s is None else " ".join(str(s).strip().split()).lower()
+
+
+def _norm_key(x) -> str:
+    """Accepts str/Path/Any with .name; returns a normalized key."""
+    if isinstance(x, Path):
+        return _norm_text(str(x))
+    try:
+        return _norm_text(str(x))
+    except Exception:
+        return _norm_text(repr(x))
+
+
+def _file_keys(fr: "FileReport") -> set[str]:
+    """All comparable keys for a FileReport: id, name, path, and basename."""
+    keys = set()
+    if fr.file_id:
+        keys.add(_norm_key(fr.file_id))
+    if fr.name:
+        keys.add(_norm_key(fr.name))
+    if fr.path:
+        p = Path(fr.path)
+        keys.add(_norm_key(str(p)))
+        keys.add(_norm_key(p.name))
+    return keys
+
+
 def _slugify(s: str) -> str:
     s = re.sub(r"\s+", "-", s.strip().lower())
     s = re.sub(r"[^a-z0-9\-]+", "", s)
@@ -26,6 +54,9 @@ class StepStatus(str, Enum):
     SUCCESS = "SUCCESS"
     FAILED  = "FAILED"
     SKIPPED = "SKIPPED"
+
+
+_TERMINAL = {StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED}
 
 
 class Check(BaseModel):
@@ -353,6 +384,57 @@ class PipelineReport(BaseModel):
         pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
         self.set_progress(self.stage or "steps", pct, self.message or "")
 
+    def files_for(self, key) -> list["FileReport"]:
+        """Return all FileReports that match file_id/name/path/basename."""
+        k = _norm_key(key)
+        if not k:
+            return []
+        out = []
+        for fr in self.files:
+            if k in _file_keys(fr):
+                out.append(fr)
+        return out
+
+    def get_file(self, key) -> "FileReport | None":
+        """Return the first matching FileReport (or None)."""
+        matches = self.files_for(key)
+        return matches[0] if matches else None
+
+    def file_seen(self, key) -> bool:
+        """Did this file appear in the report at all?"""
+        return self.get_file(key) is not None
+
+    def file_processed(self, key, *, require_success: bool = False) -> bool:
+        """
+        Has the file reached a terminal state?
+          - default: SUCCESS/FAILED/SKIPPED counts as processed
+          - require_success=True: only SUCCESS counts
+        """
+        fr = self.get_file(key)
+        if fr is None:
+            return False
+        if require_success:
+            return fr.status == StepStatus.SUCCESS
+        # terminal = finished state OR explicit 100% OR finished_at set
+        return (
+            fr.status in _TERMINAL
+            or getattr(fr, "finished_at", None) is not None
+            or (getattr(fr, "percent", None) == 100)
+        )
+
+    def unseen_expected(self, expected_iterable) -> list[str]:
+        """
+        Given filenames/ids/paths, return the ones not present in the report.
+        """
+        have = set()
+        for fr in self.files:
+            have |= _file_keys(fr)
+        missing = []
+        for x in expected_iterable:
+            k = _norm_key(x)
+            if k and k not in have:
+                missing.append(str(x))
+        return missing
 
 # --- context var to hold the "current" PipelineReport (thread/async-safe) ---
 _current_pipeline_report: contextvars.ContextVar[Optional["PipelineReport"]] = contextvars.ContextVar(
