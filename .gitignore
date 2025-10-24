@@ -5,6 +5,7 @@ test_data/
 db.sqlite3
 migrations/
 media/
+out/
 
 # secrets
 .env
