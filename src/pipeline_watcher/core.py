@@ -504,3 +504,20 @@ def pipeline_file(
 
         if exc and raise_on_exception:
             raise exc
+
+
+@contextmanager
+def file_step(file_report, id: str, *, label: str | None = None):
+    st = StepReport.begin(id, label=label)
+    t0 = time.perf_counter()
+    try:
+        yield st
+        st.end()
+    except BaseException as e:
+        st.errors.append(f"{type(e).__name__}: {e}")
+        st.metadata["traceback"] = traceback.format_exc()
+        st.fail("Unhandled exception in file step")
+        # By default, do not re-raise so the file continues recording
+    finally:
+        st.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+        file_report.append_step(st)
