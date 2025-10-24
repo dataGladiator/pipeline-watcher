@@ -1,11 +1,11 @@
 from __future__ import annotations
-from typing import Any, Dict, Iterable, List, Optional, Literal
+from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import time, traceback, contextvars, re
 from enum import Enum
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from pathlib import Path
 
 from .clocks import now_utc as _now
@@ -179,6 +179,7 @@ class FileReport(ReportBase):
     size_bytes: int | None = None
     mime_type: str | None = None
     steps: List[StepReport] = Field(default_factory=list)
+    review: Optional["ReviewFlag"] = None  # define ReviewFlag elsewhere (flagged: bool, reason: str|None)
 
     @classmethod
     def begin(cls, file_id: str, **meta) -> "FileReport":
@@ -312,6 +313,59 @@ class FileReport(ReportBase):
         # If your append_step rolls review up to the FileReport, that'll happen there.
         return self.append_step(step)
 
+    def _flagged_steps(self) -> List[StepReport]:
+        """Internal: steps that requested human review."""
+        out = []
+        for s in self.steps:
+            rf = getattr(s, "review", None)
+            if rf and getattr(rf, "flagged", False):
+                out.append(s)
+        return out
+
+    @computed_field(return_type=bool)  # included in model_dump / JSON
+    def requires_human_review(self) -> bool:
+        """
+        True if either:
+          - the file itself is flagged for review, or
+          - any contained step is flagged for review.
+        """
+        if self.review and self.review.flagged:
+            return True
+        return any(True for _ in self._flagged_steps())
+
+    @computed_field(return_type=Optional[str])  # included in model_dump / JSON
+    def human_review_reason(self) -> Optional[str]:
+        """
+        A compact summary of why this file needs human review.
+        Includes a file-level reason (if present) and a rollup from steps.
+        """
+        parts: List[str] = []
+
+        # File-level reason first (if you use it)
+        if self.review and self.review.flagged:
+            parts.append(f"File-level review: {self.review.reason or 'Review requested'}")
+
+        flagged = self._flagged_steps()
+        if not flagged and not parts:
+            return None
+
+        if flagged:
+            count = len(flagged)
+            # show up to 5 step names; add a "+N more" if needed
+            def step_name(st: StepReport) -> str:
+                return st.label or st.id
+
+            names = [step_name(s) for s in flagged[:5]]
+            more = count - len(names)
+            if more > 0:
+                names.append(f"+{more} more")
+
+            first_reason = getattr(flagged[0].review, "reason", None) or "Review requested"
+            step_word = "step" if count == 1 else f"{count} steps"
+            parts.append(f"{step_word} flagged human review: {', '.join(names)}. First reason: {first_reason}.")
+
+        return " ".join(parts) if parts else None
+
 
 class PipelineReport(BaseModel):
     """
@@ -435,6 +489,76 @@ class PipelineReport(BaseModel):
             if k and k not in have:
                 missing.append(str(x))
         return missing
+
+    def table_rows_for_files_map(self, expected: Mapping[str, Any]) -> list[dict]:
+        """
+        Produce Django/Jinja-friendly row dicts from a mapping of
+        {filename_or_id_or_path: other_properties}.
+
+        Row fields:
+          - filename: str
+          - seen: bool
+          - status: str ("SUCCESS"/"FAILED"/"SKIPPED"/"RUNNING"/"PENDING" or "MISSING")
+          - percent: int | None
+          - flagged_human_review: bool
+          - human_review_reason: str ("" if none)
+          - file_id: str | None
+          - path: str | None
+          - other: Any (the value from the mapping; often a dict for template access)
+        """
+        def _norm(s: str | None) -> str:
+            return "" if s is None else " ".join(str(s).strip().split()).lower()
+
+        def _keys(fr: "FileReport") -> set[str]:
+            ks = set()
+            if fr.file_id: ks.add(_norm(fr.file_id))
+            if fr.name:    ks.add(_norm(fr.name))
+            if fr.path:
+                p = Path(fr.path)
+                ks.add(_norm(str(p)))
+                ks.add(_norm(p.name))
+            return ks
+
+        # index by all comparable keys (first match wins)
+        index: dict[str, "FileReport"] = {}
+        for fr in self.files:
+            for k in _keys(fr):
+                index.setdefault(k, fr)
+
+        rows: list[dict] = []
+        for filename, other in expected.items():
+            display_name = str(filename)
+            key = _norm(display_name)
+            fr = index.get(key)
+
+            if fr is None:
+                rows.append({
+                    "filename": display_name,
+                    "seen": False,
+                    "status": "MISSING",
+                    "percent": None,
+                    "flagged_human_review": False,
+                    "human_review_reason": "",
+                    "file_id": None,
+                    "path": None,
+                    "other": other,
+                })
+            else:
+                flagged = getattr(fr, "requires_human_review", False)
+                reason  = getattr(fr, "human_review_reason", None) or ""
+                rows.append({
+                    "filename": display_name,
+                    "seen": True,
+                    "status": fr.status,
+                    "percent": getattr(fr, "percent", None),
+                    "flagged_human_review": bool(flagged),
+                    "human_review_reason": reason,
+                    "file_id": getattr(fr, "file_id", None),
+                    "path": getattr(fr, "path", None),
+                    "other": other,
+                })
+
+        return rows
 
 # --- context var to hold the "current" PipelineReport (thread/async-safe) ---
 _current_pipeline_report: contextvars.ContextVar[Optional["PipelineReport"]] = contextvars.ContextVar(
