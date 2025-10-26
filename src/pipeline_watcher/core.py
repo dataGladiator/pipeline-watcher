@@ -191,8 +191,9 @@ class FileReport(ReportBase):
         self.steps.append(step)
         self._recompute_percent()
         # roll-up HITL review if you added ReviewFlag earlier
-        if getattr(step, "review", None) and step.review.flagged and not getattr(self, "review", None).flagged:
-            self.review = type(step.review)(flagged=True, reason=step.review.reason or f"Step '{step.id}' requested review")
+        if step.review.flagged and not self.review.flagged:
+            self.review = ReviewFlag(flagged=True,
+                                     reason=step.review.reason or f"Step '{step.id}' requested review")
         return self
 
     def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
