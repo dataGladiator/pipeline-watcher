@@ -179,7 +179,7 @@ class FileReport(ReportBase):
     size_bytes: int | None = None
     mime_type: str | None = None
     steps: List[StepReport] = Field(default_factory=list)
-    review: Optional["ReviewFlag"] = None  # define ReviewFlag elsewhere (flagged: bool, reason: str|None)
+    review: ReviewFlag = Field(default_factory=ReviewFlag)
 
     @classmethod
     def begin(cls, file_id: str, **meta) -> "FileReport":
