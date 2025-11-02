@@ -615,11 +615,9 @@ def pipeline_step(
         st.metadata["traceback"] = traceback.format_exc()
         st.fail("Unhandled exception")
     finally:
-        print("in finally")
         st.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
 
         if pr is not None:
-            print("pr is not none")
             try:
                 pr.append_step(st)
                 if any(v is not None for v in (banner_stage, banner_percent, banner_message)):
@@ -629,8 +627,6 @@ def pipeline_step(
                         message=banner_message or pr.message,
                     )
             finally:
-                print(f"exc: {exc}")
-                print(f"save_on_exception: {save_on_exception}")
                 if exc and save_on_exception:
                     try:
                         print(f"trying to save to {output_path_override or pr.output_path}")
