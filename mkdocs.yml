@@ -1,4 +1,5 @@
 site_name: pipeline-watcher
+site_url: https://www.provenaisolutions.com/pipeline-watcher/
 repo_url: https://github.com/dataGladiator/pipeline-watcher
 theme:
   name: material
