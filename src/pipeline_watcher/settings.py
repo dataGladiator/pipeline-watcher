@@ -236,3 +236,21 @@ def with_overrides(base: WatcherSettings, **overrides) -> WatcherSettings:
     """
     return replace(base, **overrides)
 
+
+def set_global_settings(**overrides) -> WatcherSettings:
+    """
+    Permanently replace the process-wide default settings.
+
+    Notes
+    -----
+    - Intended for top-level scripts and one-off runs.
+    - Subsequent calls to :func:`current_settings` or :class:`use_settings`
+      will inherit from this new base.
+    - This affects the entire interpreter process.
+    - Not suitable for libraries and concurrent pipelines.
+    """
+    new = replace(_default_settings, **overrides)
+    global _default_settings
+    _default_settings = new
+    _settings_var.set(new)
+    return new
