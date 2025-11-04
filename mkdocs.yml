@@ -1,0 +1,52 @@
+site_name: pipeline-watcher
+repo_url: https://github.com/dataGladiator/pipeline-watcher
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.top
+    - navigation.footer
+    - toc.integrate
+  palette:
+    # Auto-select based on user’s OS, but default to dark
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate           # Material's dark scheme
+      primary: indigo         # pick any: indigo, teal, lime, etc.
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            show_source: true
+            merge_init_into_class: true
+            separate_signature: true
+            show_root_toc_entry: false
+
+            # ✅ use recognized top-level options (no 'selection:' block)
+            members: true
+            inherited_members: true
+            filters:
+              - "!^_"   # hide private names starting with underscore
+  - include-markdown
+
+nav:
+  - Overview: index.md
+  - API:
+      - Pipeline: api/pipeline.md
+      - File & Step: api/file_step.md
+      - Context managers: api/contexts.md
+
