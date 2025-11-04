@@ -329,7 +329,3 @@ report.save()
 `pipeline-watcher` stays intentionally small: append-only, JSON-first, HITL‑aware, and UI-ready.
 
 ---
-
-## License
-
-MIT (example; change to your actual license).
