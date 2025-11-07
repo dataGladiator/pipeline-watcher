@@ -41,7 +41,7 @@ def test_demo_batch_processing(tmp_path: Path):
         _make_file("f3", "file3.txt", hitl=False, fail=True),
     ]
 
-    report = PipelineReport(batch_id=101, kind="process")
+    report = PipelineReport(label="101", kind="process")
     report.set_progress("discover", 10, "Scanning files…")
 
     # Add a batch-level step for discovery
@@ -61,7 +61,7 @@ def test_demo_batch_processing(tmp_path: Path):
 
     data = json.loads(out.read_text())
     # Basic shape checks
-    assert data["batch_id"] == 101
+    assert data["batch_id"] == "101"
     assert data["kind"] == "process"
     assert isinstance(data["steps"], list)
     assert isinstance(data["files"], list)
