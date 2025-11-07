@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import time, traceback, contextvars, re
-from enum import Enum
+from enum import StrEnum
 from datetime import datetime
 from pydantic import BaseModel, Field, computed_field
 from pathlib import Path
@@ -23,23 +23,15 @@ from .utilities import _slugify, _file_keys, _norm_key
 #: Schema version written to JSON artifacts.
 SCHEMA_VERSION = "v2"
 
-class StepStatus(str, Enum):
+
+class StepStatus(StrEnum):
     """Lifecycle status for a unit of work (step/file/batch)."""
 
-    PENDING = "PENDING"
-    """Declared but not yet started."""
-
-    RUNNING = "RUNNING"
-    """In progress."""
-
-    SUCCESS = "SUCCESS"
-    """Completed successfully."""
-
-    FAILED  = "FAILED"
-    """Completed with an error or failing condition."""
-
-    SKIPPED = "SKIPPED"
-    """Intentionally not executed (precondition not met, cached, etc.)."""
+    PENDING = "PENDING"   # Declared but not yet started.
+    RUNNING = "RUNNING"   # In progress.
+    SUCCESS = "SUCCESS"   # Completed successfully.
+    FAILED  = "FAILED"    # Completed with an error or failing condition.
+    SKIPPED = "SKIPPED"   # Intentionally not executed (precondition not met, cached, etc.).
 
 
 #: Terminal statuses that end a unit's lifecycle.
