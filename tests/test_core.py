@@ -44,7 +44,7 @@ def test_filereport_append_auto_finalizes_and_rolls_percent():
 
 
 def test_pipelinereport_append_and_overall(tmp_path: Path):
-    report = PipelineReport(batch_id=7, kind="process")
+    report = PipelineReport(label="batch 7", kind="process")
     report.set_progress("parse", 10, "starting")
     # two steps: first succeeds explicitly, second finalizes via end()
     report.append_step(StepReport.begin("discover").succeed())
@@ -59,13 +59,13 @@ def test_pipelinereport_append_and_overall(tmp_path: Path):
     out = tmp_path / "progress.json"
     dump_report(out, report)
     data = json.loads(out.read_text())
-    assert data["batch_id"] == 7
+    assert data["label"] == "batch 7"
     assert data["report_version"] == "v2"
     assert isinstance(data["steps"], list)
 
 
 def test_append_file_auto_finalizes():
-    report = PipelineReport(batch_id=1, kind="validation")
+    report = PipelineReport(label="batch 1", kind="validation")
     fr = FileReport.begin(file_id="x")
     fr.append_step(StepReport.begin("validate"))
     report.append_file(fr)
