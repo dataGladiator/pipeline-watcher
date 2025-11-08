@@ -39,19 +39,20 @@ Creating a derived settings object (without changing context)::
     from pipeline_watcher.settings import current_settings, with_overrides
     eff_for_step = with_overrides(current_settings(), traceback_limit=50)
 """
-
 from __future__ import annotations
-
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple, Type
+
 
 __all__ = [
     "WatcherSettings",
     "current_settings",
     "use_settings",
     "with_overrides",
+    "set_global_settings",
 ]
+
 
 @dataclass(frozen=True)
 class WatcherSettings:
@@ -122,13 +123,14 @@ class WatcherSettings:
     exception_save_path_override: Optional[str] = None
     min_seconds_between_exception_saves: float = 0.0
 
+
 #: Module-level default settings used when no overrides are active.
 _default_settings = WatcherSettings()
 
+
 #: Context-local settings for the current logical flow (async/thread safe).
-_settings_var: ContextVar[WatcherSettings] = ContextVar(
-    "watcher_settings", default=_default_settings
-)
+_settings_var: ContextVar[WatcherSettings] = ContextVar("watcher_settings")
+
 
 def current_settings() -> WatcherSettings:
     """
@@ -151,7 +153,7 @@ def current_settings() -> WatcherSettings:
     >>> isinstance(s, WatcherSettings)
     True
     """
-    return _settings_var.get()
+    return _settings_var.get(_default_settings)
 
 class use_settings:
     """
@@ -209,6 +211,7 @@ class use_settings:
         # Never suppress exceptions
         return False
 
+
 def with_overrides(base: WatcherSettings, **overrides) -> WatcherSettings:
     """
     Return a new :class:`WatcherSettings` with selected fields replaced.
@@ -249,8 +252,8 @@ def set_global_settings(**overrides) -> WatcherSettings:
     - This affects the entire interpreter process.
     - Not suitable for libraries and concurrent pipelines.
     """
-    new = replace(_default_settings, **overrides)
     global _default_settings
+    new = replace(_default_settings, **overrides)
     _default_settings = new
     _settings_var.set(new)
     return new
