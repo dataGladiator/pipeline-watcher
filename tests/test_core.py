@@ -19,7 +19,6 @@ def test_step_status_members_and_values():
         "PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"
     }
     # enforce serialization values
-    print({m.value for m in Status})
     assert {m.value for m in Status} == {
         "pending", "running", "succeeded", "failed", "skipped"
     }

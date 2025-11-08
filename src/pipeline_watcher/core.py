@@ -7,13 +7,13 @@ The intent is to keep these pieces framework-agnostic and JSON-friendly.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol
+from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol, TypeVar
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import time, traceback, contextvars
 from enum import Enum, auto
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pathlib import Path
 
 from .clocks import now_utc as _now
@@ -104,10 +104,12 @@ class HasReview(Protocol):
     review: ReviewFlag
 
 
+HasReviewTV = TypeVar("HasReviewTV", bound="HasReview")
+
 class ReviewHelpers:
     """Behavior-only mixin: no fields, no BaseModel inheritance."""
     @property
-    def requires_human_review(self) -> bool:
+    def requires_human_review(self: HasReview) -> bool:
         """Whether the unit is flagged for human review.
 
         Returns
@@ -117,7 +119,7 @@ class ReviewHelpers:
         """
         return self.review.flagged
 
-    def request_review(self: HasReview, reason: str | None = None) -> "ReportBase":
+    def request_review(self: HasReviewTV, reason: str | None = None) -> HasReviewTV:
         """Set the HITL review flag.
 
         Parameters
@@ -133,7 +135,7 @@ class ReviewHelpers:
         self.review = ReviewFlag(flagged=True, reason=reason)
         return self
 
-    def clear_review(self: HasReview) -> "ReportBase":
+    def clear_review(self: HasReviewTV) -> HasReviewTV:
         """Clear the HITL review flag.
 
         Returns
@@ -222,6 +224,7 @@ class PipelineReport(BaseModel):
 
         Examples
         --------
+        >>> report = PipelineReport(...)
         >>> report.output_path = Path("reports/run-42.json")
         >>> report.save()
         """
@@ -244,6 +247,7 @@ class PipelineReport(BaseModel):
 
         Examples
         --------
+        >>> report = PipelineReport(...)
         >>> report.set_progress("discover", 5, "Scanning directory…")
         """
         self.stage = stage
@@ -269,7 +273,7 @@ class PipelineReport(BaseModel):
         self.updated_at = _now()
         return self
 
-    def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
+    def add_step(self, id: str, *, label: str | None = None) -> StepReport:
         """Construct, finalize, append, and return a batch-level step.
 
         Parameters
@@ -278,15 +282,13 @@ class PipelineReport(BaseModel):
             Step identifier (e.g., ``"validate_manifest"``).
         label : str, optional
             Human-friendly label.
-        **meta
-            Extra fields merged into :attr:`StepReport.metadata`.
 
         Returns
         -------
         StepReport
             The created (and ended) step.
         """
-        step = StepReport.begin(id, label=label, **meta).end()
+        step = StepReport.begin(id, label=label).end()
         self.steps.append(step)
         self.updated_at = _now()
         return step
@@ -427,10 +429,10 @@ class PipelineReport(BaseModel):
         if fr is None:
             return False
         if require_success:
-            return fr.status == Status.SUCCESS
+            return fr.status.succeeded
         # terminal = finished state OR explicit 100% OR finished_at set
         return (
-                fr.status in _TERMINAL_STATUSES
+                fr.status.terminal
                 or getattr(fr, "finished_at", None) is not None
                 or (getattr(fr, "percent", None) == 100)
         )
@@ -602,6 +604,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
 
         Examples
         --------
+        >>> step = StepReport(...)
         >>> step.start().note("begin").percent == 0
         True
         """
@@ -813,10 +816,6 @@ class FileReport(ReportBase):
         File-level HITL flag (rolled up from steps in :meth:`append_step`).
     percent : int
         Aggregate progress (average of step percents).
-    requires_human_review : bool
-        Computed field; ``True`` if the file or any step requests review.
-    human_review_reason : str or None
-        Compact summary of why review is required.
 
     Notes
     -----
@@ -876,7 +875,7 @@ class FileReport(ReportBase):
                                      reason=step.review.reason or f"Step '{step.id}' requested review")
         return self
 
-    def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
+    def add_step(self, id: str, *, label: str | None = None) -> StepReport:
         """Create a started step, immediately finalize, append, and return it.
 
         Useful when callers want to modify the returned step's metadata
@@ -888,15 +887,13 @@ class FileReport(ReportBase):
             Step identifier.
         label : str, optional
             Human-friendly label.
-        **meta
-            Extra fields merged into step :attr:`StepReport.metadata`.
 
         Returns
         -------
         StepReport
             The created (and ended) step.
         """
-        step = StepReport.begin(id, label=label, **meta)
+        step = StepReport.begin(id, label=label)
         step.end()
         self.steps.append(step)
         self._recompute_percent()
@@ -1239,8 +1236,8 @@ class StepReport(ReportBase):
     Examples
     --------
     >>> st = StepReport.begin("extract_text", label="Extract text (OCR)")
-    >>> st.add_check("ocr_quality>=0.9", ok=True)
-    >>> st.end().status in {Status.SUCCEEDED, Status.FAILED}
+    ... st.add_check("ocr_quality>=0.9", ok=True)
+    ... st.end().status in {Status.SUCCEEDED, Status.FAILED}
     True
     """
     id: str
@@ -1344,6 +1341,7 @@ def bind_pipeline(pr: "PipelineReport"):
 
     Examples
     --------
+    >>> report = PipelineReport(...)
     >>> with bind_pipeline(report):
     ...     # Inside this block, pipeline_step(None, ...) will use `report`
     ...     with pipeline_step(None, "discover", label="Discover inputs") as st:
@@ -1427,7 +1425,7 @@ def pipeline_step(
     Examples
     --------
     Minimal with bound pipeline:
-
+    >>> report = PipelineReport(...)
     >>> with bind_pipeline(report):
     ...     with pipeline_step(None, "index", label="Index batch") as st:
     ...         st.add_check("manifest_present", ok=True)
@@ -1441,7 +1439,7 @@ def pipeline_step(
     ...     banner_message="Extracting data…",
     ...     save_on_exception=True,
     ... ):
-    ...     risky_operation()
+    ...     # proceed with calculation...
     """
     pr = pr or _current_pipeline_report.get()
     st = StepReport.begin(id, label=label)
@@ -1503,7 +1501,8 @@ def bind_pipeline(pr: "PipelineReport"):
 
     Examples
     --------
-    >>> with bind_pipeline(report):
+    >>> report = PipelineReport(...)
+    ... with bind_pipeline(report):
     ...     # inside, helpers can omit `pr`
     ...     ...
     """
@@ -1593,6 +1592,7 @@ def pipeline_file(
 
     Examples
     --------
+    >>> report = PipelineReport(...)
     >>> with bind_pipeline(report):
     ...     with pipeline_file(None, file_id="f1", path="inputs/a.pdf", name="a.pdf") as fr:
     ...         fr.add_completed_step("Verified file exists")
