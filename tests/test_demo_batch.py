@@ -3,7 +3,7 @@ from pathlib import Path
 
 from pipeline_watcher import (
     StepReport, FileReport, PipelineReport,
-    StepStatus, dump_report
+    Status, dump_report
 )
 
 
