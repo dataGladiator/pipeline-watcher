@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protoc
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import time, traceback, contextvars
-from enum import Enum
+from enum import Enum, auto
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 from pathlib import Path
@@ -24,17 +24,42 @@ from .utilities import _slugify, _file_keys, _norm_key
 SCHEMA_VERSION = "v2"
 
 
-class Status(Enum):
+class LowerStrEnum(str, Enum):
+    def _generate_next_value_(name, start, count, last_values):
+        return name.lower()
+
+
+class Status(LowerStrEnum):
     """Lifecycle status for a unit of work."""
-    PENDING = "pending"   # Declared but not yet started.
-    RUNNING = "running"   # In progress.
-    SUCCESS = "success"   # Completed successfully.
-    FAILED  = "failed"    # Completed with an error or failing condition.
-    SKIPPED = "skipped"   # Intentionally not executed (precondition not met, cached, etc.).
+    PENDING = auto()     # Declared but not yet started.
+    RUNNING = auto()     # In progress.
+    SUCCEEDED = auto()   # Completed successfully.
+    FAILED  = auto()     # Completed with an error or failing condition.
+    SKIPPED = auto()     # Intentionally not executed (precondition not met, cached, etc.).
 
+    @property
+    def running(self) -> bool:
+        return self is Status.RUNNING
 
-#: Terminal statuses that end a unit's lifecycle.
-_TERMINAL_STATUSES = {Status.SUCCESS, Status.FAILED, Status.SKIPPED}
+    @property
+    def pending(self) -> bool:
+        return self is Status.PENDING
+
+    @property
+    def succeeded(self) -> bool:
+        return self is Status.SUCCEEDED
+
+    @property
+    def failed(self) -> bool:
+        return self is Status.FAILED
+
+    @property
+    def skipped(self) -> bool:
+        return self is Status.SKIPPED
+
+    @property
+    def terminal(self) -> bool:
+        return self in {self.SUCCEEDED, self.FAILED, self.SKIPPED}
 
 
 class Check(BaseModel):
@@ -586,7 +611,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         return self
 
     def succeed(self) -> "ReportBase":
-        """Finalize successfully (``SUCCESS``) and set ``percent=100``.
+        """Finalize successfully (``SUCCEEDED``) and set ``percent=100``.
 
         Also stamps ``finished_at`` to the current time.
 
@@ -595,7 +620,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         ReportBase
             Self.
         """
-        self.status = Status.SUCCESS
+        self.status = Status.SUCCEEDED
         self.percent = 100
         self.finished_at = _now()
         return self
@@ -728,7 +753,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         """Finalize the unit if not already terminal.
 
         If the current :attr:`status` is in a terminal state
-        (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
+        (``SUCCEEDED``, ``FAILED``, ``SKIPPED``), this stamps
         :attr:`finished_at` if missing and returns immediately.
 
         Otherwise, it infers success from :attr:`ok`:
@@ -749,7 +774,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         and timestamps. Exception handling is managed by higher-level
         context managers (e.g., ``pipeline_step`` / ``file_step``).
         """
-        if self.status in _TERMINAL_STATUSES:
+        if self.status.terminal:
             if not self.finished_at:
                 self.finished_at = _now()
             return self
@@ -896,7 +921,7 @@ class FileReport(ReportBase):
         FileReport
             Self.
         """
-        if self.status in (Status.SUCCESS, Status.FAILED, Status.SKIPPED):
+        if self.status.terminal:
             if not self.finished_at:
                 self.finished_at = _now()
             return self
@@ -917,7 +942,7 @@ class FileReport(ReportBase):
         if self.status == Status.FAILED or self.errors:
             return False
         # Explicit success wins
-        if self.status == Status.SUCCESS:
+        if self.status.succeeded:
             return True
         # Otherwise roll up from steps (if any)
         return all(s.ok for s in self.steps) if self.steps else True
@@ -1211,7 +1236,7 @@ class StepReport(ReportBase):
     --------
     >>> st = StepReport.begin("extract_text", label="Extract text (OCR)")
     >>> st.add_check("ocr_quality>=0.9", ok=True)
-    >>> st.end().status in {Status.SUCCESS, Status.FAILED}
+    >>> st.end().status in {Status.SUCCEEDED, Status.FAILED}
     True
     """
     id: str
@@ -1257,9 +1282,9 @@ class StepReport(ReportBase):
             ``True`` if status is ``SUCCESS``.
             Otherwise, ``all(check.ok for check in checks)`` (or ``True`` if no checks).
         """
-        if self.status == Status.FAILED or self.errors:
+        if self.status.failed or self.errors:
             return False
-        if self.status == Status.SUCCESS:
+        if self.status.succeeded:
             return True
         return all(c.ok for c in self.checks) if self.checks else True
 
