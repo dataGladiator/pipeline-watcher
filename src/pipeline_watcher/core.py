@@ -738,16 +738,20 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         raise NotImplementedError
 
     @property
-    def is_running(self):
-        return self.status == Status.RUNNING
+    def running(self):
+        return self.status.running
 
     @property
-    def is_failed(self):
-        return self.status == Status.FAILED
+    def failed(self):
+        return self.status.failed
 
     @property
-    def is_skipped(self):
-        return self.status == Status.SKIPPED
+    def skipped(self):
+        return self.status.skipped
+
+    @property
+    def succeeded(self):
+        return self.status.succeeded
 
     def end(self) -> "ReportBase":
         """Finalize the unit if not already terminal.

@@ -35,7 +35,7 @@ def test_report_base_start():
             return True
     rb = A().start()
     assert rb.percent == 0
-    assert rb.status == Status.RUNNING
+    assert rb.running
     assert (_now() - rb.started_at).seconds < 1
     assert rb.finished_at is None
     assert review_flag_unset(rb)
@@ -53,7 +53,7 @@ def test_report_base_succeed():
     rb = A().start()
     rb.succeed()
     assert rb.percent == 100
-    assert rb.status.succeeded
+    assert rb.succeeded
     assert (_now() - rb.started_at).seconds < 1
     assert (_now() - rb.finished_at).seconds < 1
     assert review_flag_unset(rb)
@@ -71,7 +71,7 @@ def test_report_base_fail():
     rb = A().start()
     rb.fail("The report failed")
     assert rb.percent == 0
-    assert rb.is_failed
+    assert rb.failed
     assert (_now() - rb.started_at).seconds < 1
     assert (_now() - rb.finished_at).seconds < 1
     assert review_flag_unset(rb)
@@ -89,7 +89,7 @@ def test_report_base_skip():
     rb = A().start()
     rb.skip("The report skipped")
     assert rb.percent == 0
-    assert rb.is_skipped
+    assert rb.skipped
     assert (_now() - rb.started_at).seconds < 1
     assert (_now() - rb.finished_at).seconds < 1
     assert not rb.requires_human_review
@@ -112,7 +112,7 @@ def test_report_base_request_review():
     assert rb.review.flagged
     assert rb.review.reason == "Human review required"
     assert rb.percent == 0
-    assert rb.is_running
+    assert rb.running
     assert (_now() - rb.started_at).seconds < 1
     assert rb.finished_at is None
     assert len(rb.notes) == 0
@@ -131,7 +131,7 @@ def test_report_base_clear_review():
     rb.clear_review()
     assert review_flag_unset(rb)
     assert rb.percent == 0
-    assert rb.status == Status.RUNNING
+    assert rb.running
     assert (_now() - rb.started_at).seconds < 1
     assert rb.finished_at is None
     assert len(rb.notes) == 0
@@ -148,7 +148,7 @@ def test_report_base_note():
     rb = A().start()
     rb.note("Note test in progress")
     assert rb.percent == 0
-    assert rb.status == Status.RUNNING
+    assert rb.running
     assert (_now() - rb.started_at).seconds < 1
     assert rb.finished_at is None
     assert not rb.requires_human_review
@@ -169,7 +169,7 @@ def test_report_base_warn():
     rb = A().start()
     rb.warn("Warn test in progress")
     assert rb.percent == 0
-    assert rb.is_running
+    assert rb.running
     assert (_now() - rb.started_at).seconds < 1
     assert rb.finished_at is None
     assert not rb.requires_human_review
@@ -190,7 +190,7 @@ def test_report_base_error():
     rb = A().start()
     rb.error("Error test in progress")
     assert rb.percent == 0
-    assert rb.is_running
+    assert rb.running
     assert (_now() - rb.started_at).seconds < 1
     assert rb.finished_at is None
     assert review_flag_unset(rb)
@@ -208,7 +208,7 @@ def test_report_base_error():
 def test_file_report_begin():
     fr = FileReport.begin(file_id="my-file.ext")
     assert fr.file_id == "my-file.ext"
-    assert fr.is_running
+    assert fr.running
     assert fr.path is None
     assert fr.name is None
     assert fr.size_bytes is None
@@ -225,7 +225,7 @@ def test_step_end_idempotent_and_success():
     s = StepReport.begin("parse", label="Parse")
     # no checks, no errors -> ok True -> succeed on end
     s1 = s.end()
-    assert s1.status.succeeded
+    assert s1.succeeded
     assert s1.percent == 100
     finished = s1.finished_at
     # calling end again should not change terminal status, only ensure finished_at
@@ -247,7 +247,7 @@ def test_filereport_append_auto_finalizes_and_rolls_percent():
     # step 1 (explicit succeed)
     st1 = StepReport.begin("parse").succeed()
     fr.append_step(st1)
-    assert fr.steps[0].status.succeeded
+    assert fr.steps[0].succeeded
     assert fr.percent == 100  # only one step so far
 
     # step 2 (implicit end -> success since no checks/errors)
@@ -271,7 +271,7 @@ def test_pipeline_report_append_and_overall(tmp_path: Path):
     report.append_step(StepReport.begin("ingest"))  # will end() to success
 
     assert len(report.steps) == 2
-    assert all(s.status.succeeded for s in report.steps)
+    assert all(s.succeeded for s in report.steps)
 
     report.recompute_overall_from_steps()
     assert 0 <= report.percent <= 100
