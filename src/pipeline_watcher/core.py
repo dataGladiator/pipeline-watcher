@@ -7,13 +7,13 @@ The intent is to keep these pieces framework-agnostic and JSON-friendly.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping
+from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-import time, traceback, contextvars, re
-from enum import StrEnum
+import time, traceback, contextvars
+from enum import Enum
 from datetime import datetime
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 from pathlib import Path
 
 from .clocks import now_utc as _now
@@ -24,30 +24,29 @@ from .utilities import _slugify, _file_keys, _norm_key
 SCHEMA_VERSION = "v2"
 
 
-class StepStatus(StrEnum):
-    """Lifecycle status for a unit of work (step/file/batch)."""
-
-    PENDING = "PENDING"   # Declared but not yet started.
-    RUNNING = "RUNNING"   # In progress.
-    SUCCESS = "SUCCESS"   # Completed successfully.
-    FAILED  = "FAILED"    # Completed with an error or failing condition.
-    SKIPPED = "SKIPPED"   # Intentionally not executed (precondition not met, cached, etc.).
+class Status(Enum):
+    """Lifecycle status for a unit of work."""
+    PENDING = "pending"   # Declared but not yet started.
+    RUNNING = "running"   # In progress.
+    SUCCESS = "success"   # Completed successfully.
+    FAILED  = "failed"    # Completed with an error or failing condition.
+    SKIPPED = "skipped"   # Intentionally not executed (precondition not met, cached, etc.).
 
 
 #: Terminal statuses that end a unit's lifecycle.
-_TERMINAL = {StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED}
+_TERMINAL_STATUSES = {Status.SUCCESS, Status.FAILED, Status.SKIPPED}
 
 
 class Check(BaseModel):
-    """Boolean validation recorded during a step.
+    """Small data class to hold the result of a check.
 
     Parameters
     ----------
-    name
+    name: str
         Identifier for the check (e.g., ``"manifest_present"``).
-    ok
+    ok: bool
         Result of the check.
-    detail
+    detail: str
         Optional human-readable context (e.g., counts, reason).
 
     Examples
@@ -55,20 +54,19 @@ class Check(BaseModel):
     >>> Check(name="ids_unique", ok=False, detail="3 duplicates")
     Check(name='ids_unique', ok=False, detail='3 duplicates')
     """
-
     name: str
     ok: bool
     detail: Optional[str] = None
 
 
 class ReviewFlag(BaseModel):
-    """Human-in-the-loop (HITL) review request attached to a unit.
+    """Small data class to hold a Human-in-the-loop (HITL) review request.
 
     Parameters
     ----------
-    flagged
+    flagged: bool
         Whether review is requested.
-    reason
+    reason: str
         Optional short reason shown in the UI.
     """
 
@@ -76,8 +74,451 @@ class ReviewFlag(BaseModel):
     reason: Optional[str] = None
 
 
-class ReportBase(BaseModel, ABC):
+# Static typing help: any model that has `.review: ReviewFlag`
+class HasReview(Protocol):
+    review: ReviewFlag
+
+
+class ReviewHelpers:
+    """Behavior-only mixin: no fields, no BaseModel inheritance."""
+    @property
+    def requires_human_review(self) -> bool:
+        """Whether the unit is flagged for human review.
+
+        Returns
+        -------
+        bool
+            ``True`` if :attr:`review.flagged` is set, else ``False``.
+        """
+        return self.review.flagged
+
+    def request_review(self: HasReview, reason: str | None = None) -> "ReportBase":
+        """Set the HITL review flag.
+
+        Parameters
+        ----------
+        reason : str, optional
+            Short UI-visible reason for requesting review.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.review = ReviewFlag(flagged=True, reason=reason)
+        return self
+
+    def clear_review(self: HasReview) -> "ReportBase":
+        """Clear the HITL review flag.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.review = ReviewFlag()
+        return self
+
+
+class PipelineReport(BaseModel):
+    """Batch-level container with ordered batch steps and per-file reports.
+
+    Designed to be JSON-serializable (Pydantic v2) and UI-friendly. Maintains
+    a progress banner (``stage``, ``percent``, ``message``, ``updated_at``),
+    an ordered list of batch-level :class:`StepReport` items, and a list of
+    :class:`FileReport` records.
+
+    Attributes
+    ----------
+    label : str
+        Human-friendly batch label (e.g., project/run name).
+    kind : {"validation", "process", "test"}
+        Category of run for UI filtering and routing.
+    stage : str
+        Short machine-friendly stage label for the progress banner.
+    percent : int
+        Overall progress ``0..100`` (informational; not enforced).
+    message : str
+        Human-readable progress note for dashboards.
+    updated_at : datetime
+        Last update timestamp (UTC). Defaults to ``now`` on construction.
+    report_version : str
+        Schema version emitted to artifacts.
+    steps : list[StepReport]
+        Ordered sequence of batch-level steps (rare compared to file steps,
+        but useful for pre/post stages like discovery/validation).
+    files : list[FileReport]
+        Per-file timelines collected in this batch.
+    output_path : Path or None
+        Default output path for :meth:`save`.
+
+    Notes
+    -----
+    - The model is append-only for auditability.
+    - Use :meth:`set_progress` to update the banner; it stamps ``updated_at``.
+    """
+
+    label: str
+    kind: Literal["validation", "process", "test"]
+    stage: str = ""
+    percent: int = 0
+    message: str = ""
+    updated_at: datetime = Field(default_factory=_now)
+    report_version: str = SCHEMA_VERSION
+
+    steps: List[StepReport] = Field(default_factory=list)
+    files: List[FileReport] = Field(default_factory=list)
+
+    output_path: Optional[Path] = None
+
+    def save(
+        self,
+        path: str | Path | None = None,
+        *,
+        indent: int = 2,
+        ensure_dir: bool = True,
+        encoding: str = "utf-8",
+    ) -> None:
+        """Persist the report to JSON on disk.
+
+        Writes directly to the target (no temp/atomic swap in this helper).
+
+        Parameters
+        ----------
+        path : str or Path or None, default None
+            Destination path. If ``None``, uses :attr:`output_path` or
+            ``reports/progress.json``.
+        indent : int, default 2
+            JSON indentation (passed to :meth:`BaseModel.model_dump_json`).
+        ensure_dir : bool, default True
+            If ``True``, creates parent directories as needed.
+        encoding : str, default "utf-8"
+            Text encoding for the output file.
+
+        Examples
+        --------
+        >>> report.output_path = Path("reports/run-42.json")
+        >>> report.save()
+        """
+        target = Path(path or self.output_path or "reports/progress.json")
+        if ensure_dir:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.model_dump_json(indent=indent), encoding=encoding)
+
+    def set_progress(self, stage: str, percent: int, message: str = "") -> None:
+        """Update the progress banner and timestamp.
+
+        Parameters
+        ----------
+        stage : str
+            Short stage label (e.g., ``"discover"``).
+        percent : int
+            Clamped to ``0..100``.
+        message : str, default ""
+            UI-visible note.
+
+        Examples
+        --------
+        >>> report.set_progress("discover", 5, "Scanning directory…")
+        """
+        self.stage = stage
+        self.percent = max(0, min(100, percent))
+        self.message = message
+        self.updated_at = _now()
+
+    def append_step(self, step: StepReport) -> "PipelineReport":
+        """Finalize and append a batch-level step; update ``updated_at``.
+
+        Parameters
+        ----------
+        step : StepReport
+            Step to finalize via :meth:`StepReport.end` and append.
+
+        Returns
+        -------
+        PipelineReport
+            Self (chainable).
+        """
+        step.end()
+        self.steps.append(step)
+        self.updated_at = _now()
+        return self
+
+    def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
+        """Construct, finalize, append, and return a batch-level step.
+
+        Parameters
+        ----------
+        id : str
+            Step identifier (e.g., ``"validate_manifest"``).
+        label : str, optional
+            Human-friendly label.
+        **meta
+            Extra fields merged into :attr:`StepReport.metadata`.
+
+        Returns
+        -------
+        StepReport
+            The created (and ended) step.
+        """
+        step = StepReport.begin(id, label=label, **meta).end()
+        self.steps.append(step)
+        self.updated_at = _now()
+        return step
+
+    def append_file(self, fr: FileReport) -> "PipelineReport":
+        """Finalize and append a :class:`FileReport`; update ``updated_at``.
+
+        Parameters
+        ----------
+        fr : FileReport
+            File report to finalize via :meth:`FileReport.end` and append.
+
+        Returns
+        -------
+        PipelineReport
+            Self (chainable).
+        """
+        fr.end()
+        self.files.append(fr)
+        self.updated_at = _now()
+        return self
+
+    def last_step(self) -> StepReport | None:
+        """Return the last batch-level step or ``None`` if empty.
+
+        Returns
+        -------
+        StepReport or None
+        """
+        return self.steps[-1] if self.steps else None
+
+    def iter_steps(self, *, status: Status | None = None) -> Iterable[StepReport]:
+        """Iterate over batch-level steps, optionally filtering by status.
+
+        Parameters
+        ----------
+        status : StepStatus or None, default None
+            If provided, only yield steps whose status equals ``status``.
+
+        Yields
+        ------
+        StepReport
+            Matching steps in append order.
+        """
+        for s in self.steps:
+            if status is None or s.status == status:
+                yield s
+
+    def recompute_overall_from_steps(self) -> None:
+        """Recalculate overall ``percent`` from batch-level steps.
+
+        Sets the banner percent to the arithmetic mean of child step
+        percents and preserves the current ``stage``/``message`` (or
+        uses defaults if unset). Does nothing if there are no steps.
+        """
+        if not self.steps:
+            return
+        pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
+        self.set_progress(self.stage or "steps", pct, self.message or "")
+
+    def files_for(self, key) -> list["FileReport"]:
+        """Return all file reports matching an id/name/path/basename.
+
+        Matching is case- and whitespace-insensitive and accepts
+        identifiers, filenames, full paths, and basenames.
+
+        Parameters
+        ----------
+        key : Any
+            A value convertible to a normalized comparison key.
+
+        Returns
+        -------
+        list[FileReport]
+            All matching file reports (may be empty).
+        """
+        k = _norm_key(key)
+        if not k:
+            return []
+        out = []
+        for fr in self.files:
+            if k in _file_keys(fr):
+                out.append(fr)
+        return out
+
+    def get_file(self, key) -> "FileReport | None":
+        """Return the first matching file report or ``None`` if absent.
+
+        Parameters
+        ----------
+        key : Any
+            See :meth:`files_for`.
+
+        Returns
+        -------
+        FileReport or None
+        """
+        matches = self.files_for(key)
+        return matches[0] if matches else None
+
+    def file_seen(self, key) -> bool:
+        """Whether a file with the given key appears in the report at all.
+
+        Parameters
+        ----------
+        key : Any
+
+        Returns
+        -------
+        bool
+        """
+        return self.get_file(key) is not None
+
+    def file_processed(self, key, *, require_success: bool = False) -> bool:
+        """Whether a file has reached a terminal/finished state.
+
+        By default, any terminal status counts (``SUCCESS``, ``FAILED``,
+        ``SKIPPED``). When ``require_success=True``, only ``SUCCESS`` counts.
+
+        Parameters
+        ----------
+        key : Any
+            File identifier/name/path/basename.
+        require_success : bool, default False
+            If ``True``, require ``SUCCESS`` only.
+
+        Returns
+        -------
+        bool
+            ``True`` if processed under the selected rule.
+
+        Notes
+        -----
+        As a additional heuristic, a file is considered processed if it
+        has ``finished_at`` set or ``percent == 100``.
+        """
+        fr = self.get_file(key)
+        if fr is None:
+            return False
+        if require_success:
+            return fr.status == Status.SUCCESS
+        # terminal = finished state OR explicit 100% OR finished_at set
+        return (
+                fr.status in _TERMINAL_STATUSES
+                or getattr(fr, "finished_at", None) is not None
+                or (getattr(fr, "percent", None) == 100)
+        )
+
+    def unseen_expected(self, expected_iterable) -> list[str]:
+        """Return expected filenames/ids/paths that are **not** present.
+
+        Parameters
+        ----------
+        expected_iterable : Iterable[Any]
+            Filenames/ids/paths expected to appear in :attr:`files`.
+
+        Returns
+        -------
+        list[str]
+            Items from ``expected_iterable`` that were not matched.
+        """
+        have = set()
+        for fr in self.files:
+            have |= _file_keys(fr)
+        missing = []
+        for x in expected_iterable:
+            k = _norm_key(x)
+            if k and k not in have:
+                missing.append(str(x))
+        return missing
+
+    def table_rows_for_files_map(self, expected: Mapping[str, Any]) -> list[dict]:
+        """Produce Django/Jinja-friendly summary rows for a files mapping.
+
+        Accepts a mapping of ``{filename_or_id_or_path: other_properties}``
+        and returns table rows with normalized status fields for templating.
+
+        Parameters
+        ----------
+        expected : Mapping[str, Any]
+            Keys are identifiers/names/paths; values are attached as ``other``.
+
+        Returns
+        -------
+        list[dict]
+            Rows with fields:
+            - ``filename`` : str
+            - ``seen`` : bool
+            - ``status`` : str (``"SUCCESS"|"FAILED"|"SKIPPED"|"RUNNING"|"PENDING"|"MISSING"``)
+            - ``percent`` : int or None
+            - ``flagged_human_review`` : bool
+            - ``human_review_reason`` : str
+            - ``file_id`` : str or None
+            - ``path`` : str or None
+            - ``other`` : Any (value from ``expected``)
+        """
+        def _norm(s: str | None) -> str:
+            return "" if s is None else " ".join(str(s).strip().split()).lower()
+
+        def _keys(fr: "FileReport") -> set[str]:
+            ks = set()
+            if fr.file_id: ks.add(_norm(fr.file_id))
+            if fr.name:    ks.add(_norm(fr.name))
+            if fr.path:
+                p = Path(fr.path)
+                ks.add(_norm(str(p)))
+                ks.add(_norm(p.name))
+            return ks
+
+        # index by all comparable keys (first match wins)
+        index: dict[str, "FileReport"] = {}
+        for fr in self.files:
+            for k in _keys(fr):
+                index.setdefault(k, fr)
+
+        rows: list[dict] = []
+        for filename, other in expected.items():
+            display_name = str(filename)
+            key = _norm(display_name)
+            fr = index.get(key)
+
+            if fr is None:
+                rows.append({
+                    "filename": display_name,
+                    "seen": False,
+                    "status": "MISSING",
+                    "percent": None,
+                    "flagged_human_review": False,
+                    "human_review_reason": "",
+                    "file_id": None,
+                    "path": None,
+                    "other": other,
+                })
+            else:
+                flagged = getattr(fr, "requires_human_review", False)
+                reason  = getattr(fr, "human_review_reason", None) or ""
+                rows.append({
+                    "filename": display_name,
+                    "seen": True,
+                    "status": fr.status,
+                    "percent": getattr(fr, "percent", None),
+                    "flagged_human_review": bool(flagged),
+                    "human_review_reason": reason,
+                    "file_id": getattr(fr, "file_id", None),
+                    "path": getattr(fr, "path", None),
+                    "other": other,
+                })
+
+        return rows
+
+
+class ReportBase(BaseModel, ABC, ReviewHelpers):
     """Abstract base for report units (steps/files/batches).
+
+    Note:
+    ----
+    Requires implementation of ok method in order to be instantiated.
 
     Provides a common lifecycle (``start → {succeed|fail|skip} → end``),
     structured messaging (``notes``, ``warnings``, ``errors``), metadata,
@@ -86,7 +527,7 @@ class ReportBase(BaseModel, ABC):
 
     Attributes
     ----------
-    status : StepStatus
+    status : Status
         Current lifecycle status (defaults to ``PENDING``).
     percent : int
         Progress percentage ``0..100`` (informational; not enforced).
@@ -115,7 +556,7 @@ class ReportBase(BaseModel, ABC):
         Ordered collection of steps for a single file.
     """
 
-    status: StepStatus = StepStatus.PENDING
+    status: Status = Status.PENDING
     percent: int = 0
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
@@ -139,7 +580,7 @@ class ReportBase(BaseModel, ABC):
         >>> step.start().note("begin").percent == 0
         True
         """
-        self.status = StepStatus.RUNNING
+        self.status = Status.RUNNING
         if not self.started_at:
             self.started_at = _now()
         return self
@@ -154,7 +595,7 @@ class ReportBase(BaseModel, ABC):
         ReportBase
             Self.
         """
-        self.status = StepStatus.SUCCESS
+        self.status = Status.SUCCESS
         self.percent = 100
         self.finished_at = _now()
         return self
@@ -172,9 +613,9 @@ class ReportBase(BaseModel, ABC):
         ReportBase
             Self.
         """
-        self.status = StepStatus.FAILED
+        self.status = Status.FAILED
         if message:
-            self.errors.append(message)
+            self.error(message)
         self.finished_at = _now()
         return self
 
@@ -191,37 +632,10 @@ class ReportBase(BaseModel, ABC):
         ReportBase
             Self.
         """
-        self.status = StepStatus.SKIPPED
+        self.status = Status.SKIPPED
         if reason:
             self.notes.append(f"Skipped: {reason}")
         self.finished_at = _now()
-        return self
-
-    def request_review(self, reason: str | None = None) -> "ReportBase":
-        """Set the HITL review flag.
-
-        Parameters
-        ----------
-        reason : str, optional
-            Short UI-visible reason for requesting review.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.review = ReviewFlag(flagged=True, reason=reason)
-        return self
-
-    def clear_review(self) -> "ReportBase":
-        """Clear the HITL review flag.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.review = ReviewFlag()
         return self
 
     def note(self, msg: str) -> "ReportBase":
@@ -259,6 +673,10 @@ class ReportBase(BaseModel, ABC):
     def error(self, msg: str) -> "ReportBase":
         """Append an error message (does not change status).
 
+        Note
+        ----
+            Fail is the preferred method. error does not change status for design consistency.
+
         Parameters
         ----------
         msg : str
@@ -278,17 +696,6 @@ class ReportBase(BaseModel, ABC):
         return self
 
     @property
-    def requires_human_review(self) -> bool:
-        """Whether the unit is flagged for human review.
-
-        Returns
-        -------
-        bool
-            ``True`` if :attr:`review.flagged` is set, else ``False``.
-        """
-        return bool(self.review.flagged)
-
-    @property
     @abstractmethod
     def ok(self) -> bool:
         """Truthiness of success when inferring status.
@@ -304,6 +711,18 @@ class ReportBase(BaseModel, ABC):
             ``True`` if the unit should be considered successful.
         """
         raise NotImplementedError
+
+    @property
+    def is_running(self):
+        return self.status == Status.RUNNING
+
+    @property
+    def is_failed(self):
+        return self.status == Status.FAILED
+
+    @property
+    def is_skipped(self):
+        return self.status == Status.SKIPPED
 
     def end(self) -> "ReportBase":
         """Finalize the unit if not already terminal.
@@ -330,120 +749,13 @@ class ReportBase(BaseModel, ABC):
         and timestamps. Exception handling is managed by higher-level
         context managers (e.g., ``pipeline_step`` / ``file_step``).
         """
-        if self.status in (StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED):
+        if self.status in _TERMINAL_STATUSES:
             if not self.finished_at:
                 self.finished_at = _now()
             return self
         return self.succeed() if self.ok else self.fail(
             "One or more checks failed" if self.errors or hasattr(self, "checks") else "Step failed"
         )
-
-
-class StepReport(ReportBase):
-    """Single unit of work within a file or batch.
-
-    Designed to be JSON-serializable and UI-friendly. A step succeeds if
-    it is explicitly marked ``SUCCESS`` or, when not terminal, if all
-    recorded checks pass and no errors are present.
-
-    Attributes
-    ----------
-    id : str
-        Machine-friendly identifier (e.g., ``"parse"``, ``"analyze"``).
-    label : str or None
-        Human-readable label for UI display.
-    checks : list[Check]
-        Recorded boolean validations for this step.
-    status : StepStatus
-        Lifecycle state inherited from :class:`ReportBase`.
-    percent : int
-        Optional progress indicator (0..100).
-    notes : list[str]
-        Narrative messages intended for UI.
-    warnings : list[str]
-        Non-fatal issues.
-    errors : list[str]
-        Fatal issues; presence typically implies failure.
-    metadata : dict[str, Any]
-        Arbitrary structured context.
-    review : ReviewFlag
-        HITL review flag attached to the step.
-    report_version : str
-        Schema version for persisted artifacts.
-
-    Notes
-    -----
-    The auto-generated initializer accepts the same fields as attributes.
-
-    Examples
-    --------
-    >>> st = StepReport.begin("extract_text", label="Extract text (OCR)")
-    >>> st.add_check("ocr_quality>=0.9", ok=True)
-    >>> st.end().status in {StepStatus.SUCCESS, StepStatus.FAILED}
-    True
-    """
-
-    id: str
-    label: Optional[str] = None
-    checks: List[Check] = Field(default_factory=list)
-
-    @classmethod
-    def begin(cls, id: str, *, label: str | None = None, **meta) -> "StepReport":
-        """Construct and mark the step as started.
-
-        Parameters
-        ----------
-        id : str
-            Step identifier.
-        label : str, optional
-            Human-friendly label.
-        **meta
-            Extra key/values merged into :attr:`metadata`.
-
-        Returns
-        -------
-        StepReport
-            Started step report (``status=RUNNING``).
-        """
-        return cls(id=id, label=label, metadata=dict(meta)).start()
-
-    @property
-    def ok(self) -> bool:
-        """Truthiness of success used by :meth:`ReportBase.end`.
-
-        Returns
-        -------
-        bool
-            ``False`` if status is ``FAILED`` or any errors exist.
-            ``True`` if status is ``SUCCESS``.
-            Otherwise, ``all(check.ok for check in checks)`` (or ``True`` if no checks).
-        """
-        if self.status == StepStatus.FAILED or self.errors:
-            return False
-        if self.status == StepStatus.SUCCESS:
-            return True
-        return all(c.ok for c in self.checks) if self.checks else True
-
-    def add_check(self, name: str, ok: bool, detail: Optional[str] = None) -> None:
-        """Record a boolean validation result.
-
-        Parameters
-        ----------
-        name : str
-            Check identifier (e.g., ``"manifest_present"``).
-        ok : bool
-            Outcome of the check.
-        detail : str, optional
-            Additional context for UI/debugging.
-
-        Examples
-        --------
-        >>> st = StepReport.begin("validate")
-        >>> st.add_check("ids_unique", ok=False, detail="3 duplicates")
-        >>> st.ok
-        False
-        """
-        self.checks.append(Check(name=name, ok=ok, detail=detail))
 
 
 class FileReport(ReportBase):
@@ -584,7 +896,7 @@ class FileReport(ReportBase):
         FileReport
             Self.
         """
-        if self.status in (StepStatus.SUCCESS, StepStatus.FAILED, StepStatus.SKIPPED):
+        if self.status in (Status.SUCCESS, Status.FAILED, Status.SKIPPED):
             if not self.finished_at:
                 self.finished_at = _now()
             return self
@@ -602,10 +914,10 @@ class FileReport(ReportBase):
             Otherwise, ``all(step.ok for step in steps)`` (or ``True`` if no steps).
         """
         # Failure wins
-        if self.status == StepStatus.FAILED or self.errors:
+        if self.status == Status.FAILED or self.errors:
             return False
         # Explicit success wins
-        if self.status == StepStatus.SUCCESS:
+        if self.status == Status.SUCCESS:
             return True
         # Otherwise roll up from steps (if any)
         return all(s.ok for s in self.steps) if self.steps else True
@@ -859,397 +1171,119 @@ class FileReport(ReportBase):
         return " ".join(parts) if parts else None
 
 
-class PipelineReport(BaseModel):
-    """Batch-level container with ordered batch steps and per-file reports.
+class StepReport(ReportBase):
+    """Single unit of work within a file or batch.
 
-    Designed to be JSON-serializable (Pydantic v2) and UI-friendly. Maintains
-    a progress banner (``stage``, ``percent``, ``message``, ``updated_at``),
-    an ordered list of batch-level :class:`StepReport` items, and a list of
-    :class:`FileReport` records.
+    A step succeeds if
+    it is explicitly marked ``SUCCESS`` or, when not terminal, if all
+    recorded checks pass and no errors are present.
 
     Attributes
     ----------
-    label : str
-        Human-friendly batch label (e.g., project/run name).
-    kind : {"validation", "process", "test"}
-        Category of run for UI filtering and routing.
-    stage : str
-        Short machine-friendly stage label for the progress banner.
+    id : str
+        Machine-friendly identifier (e.g., ``"parse"``, ``"analyze"``).
+    label : str or None
+        Human-readable label for UI display.
+    checks : list[Check]
+        Recorded boolean validations for this step.
+    status : Status
+        Lifecycle state inherited from :class:`ReportBase`.
     percent : int
-        Overall progress ``0..100`` (informational; not enforced).
-    message : str
-        Human-readable progress note for dashboards.
-    updated_at : datetime
-        Last update timestamp (UTC). Defaults to ``now`` on construction.
+        Optional progress indicator (0..100).
+    notes : list[str]
+        Narrative messages intended for UI.
+    warnings : list[str]
+        Non-fatal issues.
+    errors : list[str]
+        Fatal issues; presence typically implies failure.
+    metadata : dict[str, Any]
+        Arbitrary structured context.
+    review : ReviewFlag
+        HITL review flag attached to the step.
     report_version : str
-        Schema version emitted to artifacts.
-    steps : list[StepReport]
-        Ordered sequence of batch-level steps (rare compared to file steps,
-        but useful for pre/post stages like discovery/validation).
-    files : list[FileReport]
-        Per-file timelines collected in this batch.
-    output_path : Path or None
-        Default output path for :meth:`save`.
+        Schema version for persisted artifacts.
 
     Notes
     -----
-    - The model is append-only for auditability.
-    - Use :meth:`set_progress` to update the banner; it stamps ``updated_at``.
+    The auto-generated initializer accepts the same fields as attributes.
+
+    Examples
+    --------
+    >>> st = StepReport.begin("extract_text", label="Extract text (OCR)")
+    >>> st.add_check("ocr_quality>=0.9", ok=True)
+    >>> st.end().status in {Status.SUCCESS, Status.FAILED}
+    True
     """
+    id: str
+    label: Optional[str] = None
+    checks: List[Check] = Field(default_factory=list)
 
-    label: str
-    kind: Literal["validation", "process", "test"]
-    stage: str = ""
-    percent: int = 0
-    message: str = ""
-    updated_at: datetime = Field(default_factory=_now)
-    report_version: str = SCHEMA_VERSION
-
-    steps: List[StepReport] = Field(default_factory=list)
-    files: List[FileReport] = Field(default_factory=list)
-
-    output_path: Optional[Path] = None
-
-    def save(
-        self,
-        path: str | Path | None = None,
-        *,
-        indent: int = 2,
-        ensure_dir: bool = True,
-        encoding: str = "utf-8",
-    ) -> None:
-        """Persist the report to JSON on disk.
-
-        Writes directly to the target (no temp/atomic swap in this helper).
-
-        Parameters
-        ----------
-        path : str or Path or None, default None
-            Destination path. If ``None``, uses :attr:`output_path` or
-            ``reports/progress.json``.
-        indent : int, default 2
-            JSON indentation (passed to :meth:`BaseModel.model_dump_json`).
-        ensure_dir : bool, default True
-            If ``True``, creates parent directories as needed.
-        encoding : str, default "utf-8"
-            Text encoding for the output file.
-
-        Examples
-        --------
-        >>> report.output_path = Path("reports/run-42.json")
-        >>> report.save()
-        """
-        target = Path(path or self.output_path or "reports/progress.json")
-        if ensure_dir:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.model_dump_json(indent=indent), encoding=encoding)
-
-    def set_progress(self, stage: str, percent: int, message: str = "") -> None:
-        """Update the progress banner and timestamp.
-
-        Parameters
-        ----------
-        stage : str
-            Short stage label (e.g., ``"discover"``).
-        percent : int
-            Clamped to ``0..100``.
-        message : str, default ""
-            UI-visible note.
-
-        Examples
-        --------
-        >>> report.set_progress("discover", 5, "Scanning directory…")
-        """
-        self.stage = stage
-        self.percent = max(0, min(100, percent))
-        self.message = message
-        self.updated_at = _now()
-
-    def append_step(self, step: StepReport) -> "PipelineReport":
-        """Finalize and append a batch-level step; update ``updated_at``.
-
-        Parameters
-        ----------
-        step : StepReport
-            Step to finalize via :meth:`StepReport.end` and append.
-
-        Returns
-        -------
-        PipelineReport
-            Self (chainable).
-        """
-        step.end()
-        self.steps.append(step)
-        self.updated_at = _now()
+    @model_validator(mode="after")
+    def _default_label(self):
+        # Treat None/"" as unset; drop the `or self.label == ""` part if "" is meaningful
+        if self.label is None or self.label == "":
+            # When frozen, use object.__setattr__ during construction-time adjustments
+            object.__setattr__(self, "label", self.id)
         return self
 
-    def add_step(self, id: str, *, label: str | None = None, **meta) -> StepReport:
-        """Construct, finalize, append, and return a batch-level step.
+    @classmethod
+    def begin(cls, id: str, *, label: str | None = None) -> "StepReport":
+        """Construct and mark the step as started.
 
         Parameters
         ----------
         id : str
-            Step identifier (e.g., ``"validate_manifest"``).
+            Step identifier.
         label : str, optional
             Human-friendly label.
-        **meta
-            Extra fields merged into :attr:`StepReport.metadata`.
 
         Returns
         -------
         StepReport
-            The created (and ended) step.
+            Started step report (``status=RUNNING``).
         """
-        step = StepReport.begin(id, label=label, **meta).end()
-        self.steps.append(step)
-        self.updated_at = _now()
-        return step
+        if label is None or label == "":
+            label = id
+        return cls(id=id, label=label).start()
 
-    def append_file(self, fr: FileReport) -> "PipelineReport":
-        """Finalize and append a :class:`FileReport`; update ``updated_at``.
-
-        Parameters
-        ----------
-        fr : FileReport
-            File report to finalize via :meth:`FileReport.end` and append.
-
-        Returns
-        -------
-        PipelineReport
-            Self (chainable).
-        """
-        fr.end()
-        self.files.append(fr)
-        self.updated_at = _now()
-        return self
-
-    def last_step(self) -> StepReport | None:
-        """Return the last batch-level step or ``None`` if empty.
-
-        Returns
-        -------
-        StepReport or None
-        """
-        return self.steps[-1] if self.steps else None
-
-    def iter_steps(self, *, status: StepStatus | None = None) -> Iterable[StepReport]:
-        """Iterate over batch-level steps, optionally filtering by status.
-
-        Parameters
-        ----------
-        status : StepStatus or None, default None
-            If provided, only yield steps whose status equals ``status``.
-
-        Yields
-        ------
-        StepReport
-            Matching steps in append order.
-        """
-        for s in self.steps:
-            if status is None or s.status == status:
-                yield s
-
-    def recompute_overall_from_steps(self) -> None:
-        """Recalculate overall ``percent`` from batch-level steps.
-
-        Sets the banner percent to the arithmetic mean of child step
-        percents and preserves the current ``stage``/``message`` (or
-        uses defaults if unset). Does nothing if there are no steps.
-        """
-        if not self.steps:
-            return
-        pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
-        self.set_progress(self.stage or "steps", pct, self.message or "")
-
-    def files_for(self, key) -> list["FileReport"]:
-        """Return all file reports matching an id/name/path/basename.
-
-        Matching is case- and whitespace-insensitive and accepts
-        identifiers, filenames, full paths, and basenames.
-
-        Parameters
-        ----------
-        key : Any
-            A value convertible to a normalized comparison key.
-
-        Returns
-        -------
-        list[FileReport]
-            All matching file reports (may be empty).
-        """
-        k = _norm_key(key)
-        if not k:
-            return []
-        out = []
-        for fr in self.files:
-            if k in _file_keys(fr):
-                out.append(fr)
-        return out
-
-    def get_file(self, key) -> "FileReport | None":
-        """Return the first matching file report or ``None`` if absent.
-
-        Parameters
-        ----------
-        key : Any
-            See :meth:`files_for`.
-
-        Returns
-        -------
-        FileReport or None
-        """
-        matches = self.files_for(key)
-        return matches[0] if matches else None
-
-    def file_seen(self, key) -> bool:
-        """Whether a file with the given key appears in the report at all.
-
-        Parameters
-        ----------
-        key : Any
+    @property
+    def ok(self) -> bool:
+        """Truthiness of success used by :meth:`ReportBase.end`.
 
         Returns
         -------
         bool
+            ``False`` if status is ``FAILED`` or any errors exist.
+            ``True`` if status is ``SUCCESS``.
+            Otherwise, ``all(check.ok for check in checks)`` (or ``True`` if no checks).
         """
-        return self.get_file(key) is not None
-
-    def file_processed(self, key, *, require_success: bool = False) -> bool:
-        """Whether a file has reached a terminal/finished state.
-
-        By default, any terminal status counts (``SUCCESS``, ``FAILED``,
-        ``SKIPPED``). When ``require_success=True``, only ``SUCCESS`` counts.
-
-        Parameters
-        ----------
-        key : Any
-            File identifier/name/path/basename.
-        require_success : bool, default False
-            If ``True``, require ``SUCCESS`` only.
-
-        Returns
-        -------
-        bool
-            ``True`` if processed under the selected rule.
-
-        Notes
-        -----
-        As a additional heuristic, a file is considered processed if it
-        has ``finished_at`` set or ``percent == 100``.
-        """
-        fr = self.get_file(key)
-        if fr is None:
+        if self.status == Status.FAILED or self.errors:
             return False
-        if require_success:
-            return fr.status == StepStatus.SUCCESS
-        # terminal = finished state OR explicit 100% OR finished_at set
-        return (
-            fr.status in _TERMINAL
-            or getattr(fr, "finished_at", None) is not None
-            or (getattr(fr, "percent", None) == 100)
-        )
+        if self.status == Status.SUCCESS:
+            return True
+        return all(c.ok for c in self.checks) if self.checks else True
 
-    def unseen_expected(self, expected_iterable) -> list[str]:
-        """Return expected filenames/ids/paths that are **not** present.
+    def add_check(self, name: str, ok: bool, detail: Optional[str] = None) -> None:
+        """Record a boolean validation result.
 
         Parameters
         ----------
-        expected_iterable : Iterable[Any]
-            Filenames/ids/paths expected to appear in :attr:`files`.
+        name : str
+            Check identifier (e.g., ``"manifest_present"``).
+        ok : bool
+            Outcome of the check.
+        detail : str, optional
+            Additional context for UI/debugging.
 
-        Returns
-        -------
-        list[str]
-            Items from ``expected_iterable`` that were not matched.
+        Examples
+        --------
+        >>> st = StepReport.begin("validate")
+        >>> st.add_check("ids_unique", ok=False, detail="3 duplicates")
+        >>> st.ok
+        False
         """
-        have = set()
-        for fr in self.files:
-            have |= _file_keys(fr)
-        missing = []
-        for x in expected_iterable:
-            k = _norm_key(x)
-            if k and k not in have:
-                missing.append(str(x))
-        return missing
+        self.checks.append(Check(name=name, ok=ok, detail=detail))
 
-    def table_rows_for_files_map(self, expected: Mapping[str, Any]) -> list[dict]:
-        """Produce Django/Jinja-friendly summary rows for a files mapping.
-
-        Accepts a mapping of ``{filename_or_id_or_path: other_properties}``
-        and returns table rows with normalized status fields for templating.
-
-        Parameters
-        ----------
-        expected : Mapping[str, Any]
-            Keys are identifiers/names/paths; values are attached as ``other``.
-
-        Returns
-        -------
-        list[dict]
-            Rows with fields:
-            - ``filename`` : str
-            - ``seen`` : bool
-            - ``status`` : str (``"SUCCESS"|"FAILED"|"SKIPPED"|"RUNNING"|"PENDING"|"MISSING"``)
-            - ``percent`` : int or None
-            - ``flagged_human_review`` : bool
-            - ``human_review_reason`` : str
-            - ``file_id`` : str or None
-            - ``path`` : str or None
-            - ``other`` : Any (value from ``expected``)
-        """
-        def _norm(s: str | None) -> str:
-            return "" if s is None else " ".join(str(s).strip().split()).lower()
-
-        def _keys(fr: "FileReport") -> set[str]:
-            ks = set()
-            if fr.file_id: ks.add(_norm(fr.file_id))
-            if fr.name:    ks.add(_norm(fr.name))
-            if fr.path:
-                p = Path(fr.path)
-                ks.add(_norm(str(p)))
-                ks.add(_norm(p.name))
-            return ks
-
-        # index by all comparable keys (first match wins)
-        index: dict[str, "FileReport"] = {}
-        for fr in self.files:
-            for k in _keys(fr):
-                index.setdefault(k, fr)
-
-        rows: list[dict] = []
-        for filename, other in expected.items():
-            display_name = str(filename)
-            key = _norm(display_name)
-            fr = index.get(key)
-
-            if fr is None:
-                rows.append({
-                    "filename": display_name,
-                    "seen": False,
-                    "status": "MISSING",
-                    "percent": None,
-                    "flagged_human_review": False,
-                    "human_review_reason": "",
-                    "file_id": None,
-                    "path": None,
-                    "other": other,
-                })
-            else:
-                flagged = getattr(fr, "requires_human_review", False)
-                reason  = getattr(fr, "human_review_reason", None) or ""
-                rows.append({
-                    "filename": display_name,
-                    "seen": True,
-                    "status": fr.status,
-                    "percent": getattr(fr, "percent", None),
-                    "flagged_human_review": bool(flagged),
-                    "human_review_reason": reason,
-                    "file_id": getattr(fr, "file_id", None),
-                    "path": getattr(fr, "path", None),
-                    "other": other,
-                })
-
-        return rows
 
 
 # Thread/async-safe context variable holding the bound PipelineReport.
