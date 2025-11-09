@@ -7,17 +7,22 @@ The intent is to keep these pieces framework-agnostic and JSON-friendly.
 """
 
 from __future__ import annotations
+import os
 from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol, TypeVar
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-import time, traceback, contextvars
+import time, traceback, contextvars, warnings
+from io import StringIO
+from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from enum import Enum, auto
 from datetime import datetime
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator, field_validator
 from pathlib import Path
-
+from dataclasses import fields
+import mimetypes
 from .clocks import now_utc as _now
 from .utilities import _slugify, _file_keys, _norm_key
+from .settings import WatcherSettings, use_settings
 
 
 #: Schema version written to JSON artifacts.
@@ -802,14 +807,8 @@ class FileReport(ReportBase):
     ----------
     file_id : str
         Stable identifier for the file (preferably unique within a batch).
-    path : str or None
+    path : Path or None
         Source path or URI for display/debugging.
-    name : str or None
-        Human-friendly name (e.g., filename).
-    size_bytes : int or None
-        File size, if known.
-    mime_type : str or None
-        MIME type hint for UIs.
     steps : list[StepReport]
         Ordered step sequence (normally appended via helpers).
     review : ReviewFlag
@@ -821,32 +820,36 @@ class FileReport(ReportBase):
     -----
     The auto-generated initializer accepts the same fields as attributes.
     """
-
-    file_id: str
-    path: str | None = None
-    name: str | None = None
-    size_bytes: int | None = None
-    mime_type: str | None = None
+    model_config = {"extra": "forbid"}
+    path: Path
+    file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
-    review: ReviewFlag = Field(default_factory=ReviewFlag)
 
     @classmethod
-    def begin(cls, file_id: str, **meta) -> "FileReport":
+    def begin(cls,
+              path: Path,
+              file_id: str | None = None,
+              metadata: dict | None = None
+    ) -> "FileReport":
         """Construct and mark the file report as started.
 
         Parameters
         ----------
         file_id : str
             Stable file identifier.
-        **meta
-            Extra fields merged into :attr:`metadata` (e.g., ``path``, ``name``).
+        path (optional) : Path
+            Path to file.
+        metadata (optional): dict
+            Dictionary of metadata about the file.
 
         Returns
         -------
         FileReport
             Started file report (``status=RUNNING``).
         """
-        return cls(file_id=file_id, **meta).start()
+        return cls(path=path,
+                   file_id=file_id,
+                   metadata=metadata).start()
 
     def append_step(self, step: StepReport) -> "FileReport":
         """Finalize and append a step; recompute aggregate percent.
@@ -947,6 +950,39 @@ class FileReport(ReportBase):
             return True
         # Otherwise roll up from steps (if any)
         return all(s.ok for s in self.steps) if self.steps else True
+
+    @computed_field
+    @property
+    def name(self) -> str:
+        # read-only, derived; not persisted unless you include computed fields explicitly
+        return self.path.name
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _coerce_path(cls, v):
+        if isinstance(v, (str, Path)):
+            p = Path(v)
+            if str(p) == "":
+                raise ValueError("path cannot be empty")
+            return p
+        raise TypeError("path must be str or Path")
+
+    @computed_field
+    @property
+    def mime_type(self) -> Optional[str]:
+        # Extension-based guess; no filesystem touch
+        mt, _ = mimetypes.guess_type(self.path.as_posix())
+        return mt
+
+    @computed_field
+    @property
+    def size_bytes(self) -> Optional[int]:
+        # Best-effort; avoid raising on missing/inaccessible paths
+        try:
+            # Use os.path.getsize for slightly cheaper syscall than full stat attr unpack
+            return os.path.getsize(self.path)
+        except Exception:
+            return None
 
     def _recompute_percent(self) -> None:
         """Recompute :attr:`percent` as the arithmetic mean of step percents.
@@ -1513,134 +1549,112 @@ def bind_pipeline(pr: "PipelineReport"):
         _current_pipeline_report.reset(token)
 
 
+_SETTINGS_KEYS: set[str] = {f.name for f in fields(WatcherSettings)}
+
+
 @contextmanager
 def pipeline_file(
     pr: Optional["PipelineReport"],
+    path: Path | str,
     *,
-    file_id: str,
-    path: str | None = None,
-    name: str | None = None,
-    size_bytes: int | None = None,
-    mime_type: str | None = None,
+    file_id: str | None = None,
     metadata: dict | None = None,
     set_stage_on_enter: bool = False,
     banner_stage: str | None = None,
     banner_percent_on_exit: int | None = None,
     banner_message_on_exit: str | None = None,
-    raise_on_exception: bool = False,
-    save_on_exception: bool = True,
-    output_path_override: str | Path | None = None
+    **other_options,
 ):
-    """Context manager for a **per-file** processing block.
-
-    Creates a :class:`FileReport`, times it, captures exceptions (optional
-    re-raise), appends it to the provided or bound pipeline, and optionally
-    updates the pipeline banner on enter/exit.
-
-    Parameters
-    ----------
-    pr : PipelineReport or None
-        Pipeline to append the file report to. If ``None``, uses the pipeline
-        bound via :func:`bind_pipeline`. If neither available, the file report
-        is yielded but not appended.
-    file_id : str
-        Stable identifier for the file (preferably unique in the batch).
-    path, name : str or None, optional
-        Display/source info for UIs.
-    size_bytes : int or None, optional
-        File size hint.
-    mime_type : str or None, optional
-        MIME type hint for UIs.
-    metadata : dict or None, optional
-        Extra metadata merged into the file report.
-    set_stage_on_enter : bool, default False
-        If ``True``, set the pipeline banner’s ``stage`` when entering the
-        context (percent/message left as-is on enter).
-    banner_stage : str or None, optional
-        Stage to set when updating the banner (on enter if
-        ``set_stage_on_enter=True`` and/or on exit when appending). Defaults to
-        ``name`` or ``file_id`` on enter; leaves stage unchanged on exit if
-        ``None``.
-    banner_percent_on_exit : int or None, optional
-        Percent to set on the banner **after** appending the file. If ``None``,
-        keeps current percent.
-    banner_message_on_exit : str or None, optional
-        Message to set on the banner **after** appending. If ``None``, keeps
-        current message.
-    raise_on_exception : bool, default False
-        If ``True``, re-raise after recording error; if ``False``, swallow so
-        the pipeline can continue.
-    save_on_exception : bool, default True
-        If an exception occurs and a pipeline is available, attempt to save the
-        pipeline JSON immediately (best effort).
-    output_path_override : str or Path or None, optional
-        When saving on exception, write here instead of ``pr.output_path``.
-
-    Yields
-    ------
-    FileReport
-        The live file report to populate inside the ``with`` block.
-
-    Notes
-    -----
-    - Exceptions are recorded on the file report:
-      - ``errors += [\"{Type}: {message}\"]``
-      - ``metadata['traceback'] = traceback.format_exc()``
-      - status set via ``fail("Unhandled exception while processing file")``
-    - ``metadata['duration_ms']`` is recorded on exit.
-    - On normal completion, the file is marked ``SUCCESS`` and finalized.
-
-    Examples
-    --------
-    >>> report = PipelineReport(...)
-    >>> with bind_pipeline(report):
-    ...     with pipeline_file(None, file_id="f1", path="inputs/a.pdf", name="a.pdf") as fr:
-    ...         fr.add_completed_step("Verified file exists")
     """
-    pr = pr or _current_pipeline_report.get()
+    Per-file processing block using WatcherSettings as the source of truth.
 
-    fr = FileReport.begin(file_id=file_id, path=path, name=name)
-    if size_bytes is not None: fr.size_bytes = size_bytes
-    if mime_type  is not None: fr.mime_type  = mime_type
-    if metadata:               fr.metadata.update(metadata)
+    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True)
+    and they will apply only within this context; otherwise the current
+    context settings are used.
+    """
+    settings_overrides = {
+        k: v for k, v in other_options.items() if k in _SETTINGS_KEYS
+    }
+    # Bind to a pipeline if not explicitly provided
+    pr = pr or _current_pipeline_report.get(None)
+    if pr is None:
+        raise RuntimeError(
+            "pipeline_file requires a PipelineReport: pass `pr=` or call within `with bind_pipeline(pr):`"
+        )
+    # Apply settings overrides (if any) only for this block
+    with use_settings(**settings_overrides) as settings:
+        fr = FileReport.begin(path=Path(path) if path is not None else None,
+                              file_id=file_id,
+                              metadata=metadata if metadata else {})
+        if set_stage_on_enter:
+            pr.set_progress(stage=banner_stage or (fr.name or file_id),
+                            percent=pr.percent,
+                            message=pr.message)
 
-    t0 = time.perf_counter()
+        t0 = time.perf_counter()
 
-    if pr is not None and set_stage_on_enter:
-        pr.set_progress(stage=banner_stage or (name or file_id),
-                        percent=pr.percent,
-                        message=pr.message)
+        # Optional capture (kept minimal & settings-driven)
+        stdout_buf = StringIO() if settings.capture_streams else None
+        stderr_buf = StringIO() if settings.capture_streams else None
+        warn_list: list[warnings.WarningMessage] | None = None
 
-    exc: BaseException | None = None
-    try:
-        yield fr
-        fr.succeed()  # only runs if the block completes successfully
-    except BaseException as e:
-        exc = e
-        fr.errors.append(f"{type(e).__name__}: {e}")
-        fr.metadata["traceback"] = traceback.format_exc()
-        fr.fail("Unhandled exception while processing file")
-    finally:
-        fr.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
-        fr.end()
-        if pr is not None:
+        with ExitStack() as stack:
+            if settings.capture_warnings:
+                warn_list = stack.enter_context(warnings.catch_warnings(record=True))
+                warnings.simplefilter("default")
+            if settings.capture_streams:
+                if stdout_buf: stack.enter_context(redirect_stdout(stdout_buf))
+                if stderr_buf: stack.enter_context(redirect_stderr(stderr_buf))
+
+            exc: BaseException | None = None
             try:
-                pr.append_file(fr)
-                if banner_stage or banner_percent_on_exit is not None or banner_message_on_exit:
-                    pr.set_progress(
-                        stage=banner_stage or pr.stage,
-                        percent=pr.percent if banner_percent_on_exit is None else banner_percent_on_exit,
-                        message=banner_message_on_exit or pr.message,
+                yield fr
+                fr.succeed()
+            except BaseException as e:
+                exc = e
+                fr.errors.append(f"{type(e).__name__}: {e}")
+                if settings.store_traceback:
+                    tb = "".join(
+                        traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit)
                     )
+                    if tb:
+                        fr.metadata["traceback"] = tb
+                fr.fail("Unhandled exception while processing file")
             finally:
-                if exc and save_on_exception:
-                    try:
-                        pr.save(output_path_override or pr.output_path)
-                    except Exception as save_err:
-                        fr.warnings.append(f"save failed: {save_err!r}")
+                # Persist simple diagnostics
+                if stdout_buf is not None:
+                    fr.metadata["stdout"] = stdout_buf.getvalue()
+                if stderr_buf is not None:
+                    fr.metadata["stderr"] = stderr_buf.getvalue()
+                if warn_list is not None:
+                    fr.metadata["warnings"] = [
+                        f"{w.category.__name__}: {w.message}" for w in warn_list  # type: ignore[attr-defined]
+                    ]
 
-        if exc and raise_on_exception:
-            raise exc
+                fr.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+                fr.end()
+
+                if pr is not None:
+                    try:
+                        pr.append_file(fr)
+                        if banner_stage or banner_percent_on_exit is not None or banner_message_on_exit:
+                            pr.set_progress(
+                                stage=banner_stage or pr.stage,
+                                percent=pr.percent if banner_percent_on_exit is None else banner_percent_on_exit,
+                                message=banner_message_on_exit or pr.message,
+                            )
+                    finally:
+                        # Best-effort save-on-exception
+                        if exc and settings.save_on_exception:
+                            try:
+                                save_path = settings.exception_save_path_override or pr.output_path
+                                if save_path:
+                                    pr.save(save_path)
+                            except Exception as save_err:
+                                fr.warnings.append(f"save failed: {save_err!r}")
+
+                if exc and settings.raise_on_exception:
+                    raise exc
 
 
 @contextmanager
