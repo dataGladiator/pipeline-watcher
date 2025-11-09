@@ -1,26 +1,58 @@
 <img title="" src="docs/images/pipeline-watcher-logo-white.webp" alt="pipeline-watcher-logo-white.webp" width="116">
 
-
 # pipeline-watcher
 
-`pipeline-watcher` is a lightweight type-safe, thread-safe, UI-ready, structured logger for **AI/ML/Scientific pipelines**—with built‑in support for **HITL (Human‑In‑The‑Loop) review**.  
-Instead of unstructured logs, it emits **structured, type-safe JSON reports** that capture comments, branches, errors, tracebacks, warnings and more for batches → files → steps that your UI can render directly. Included are Jinja2 templates and tools to transform the JSON logs into easily navigable HTML. Think of it as:
+`pipeline-watcher` is a lightweight, type-safe, thread-safe structured logger for **AI/ML and scientific pipelines**, built on **Pydantic v2**. Instead of free-form text logs, it produces **structured JSON reports** that capture:
 
-> type-safe, thread-safe structured logs for process and algorithm monitoring that can be viewed in your browser
+- comments and notes
 
-`pipeline-watcher` is built upon Pydantic v2 in Python 3.10. It models **batches**, **files**, and **steps**, plus optional **review flags** so you can surface errors, warnings, output, comments and “needs human review” right in your browser.
+- timing information
+
+- warnings, errors, and tracebacks
+
+- branch decisions and metadata
+
+- HITL (Human-In-The-Loop) review flags
+
+The result is a clean, UI-ready log format that your browser or dashboard can render directly. Included are helper Jinja2 templates for compiling the reports into HTML.
+
+> **In short:** pipeline-watcher gives you structured, type-safe logs for algorithm monitoring—viewable directly in your browser.
 
 ---
 
-## Demo (Quick Glance)
+Features
 
-This shows:
+- **Type-safe models** for batches, files, and steps
 
-- iterating over a directory of PDFs,
-- **comment replacement via notes** (your inline rationale becomes UI-visible),
-- **context managers** that **handle exceptions** and **auto-finalize** records,
-- **HITL review** when OCR quality is low,
-- and the **`file_step`** helper for minimal ceremony inside a file block.
+- **Thread-safe runtime state** using `contextvars`
+
+- **Automatic timing** for every step and file
+
+- **Minimal-ceremony context managers** for safe logging and exception capture
+
+- **HITL review flags** for ambiguous or low-confidence outputs
+
+- **Robust serialization** via Pydantic’s `model_dump_json()`
+
+- **Zero non-standard dependencies** (Pydantic + standard library only)
+
+- **pipeline-watcher-site**: optional companion for turning logs into navigable HTML
+
+---
+
+## ## Demo (Quick Glance)
+
+This example shows:
+
+- Iterating over a directory of PDFs
+
+- Attaching user notes and metadata
+
+- Automatic timing and exception handling via context managers
+
+- Raising HITL review steps when conditions fail
+
+- Using the `file_step` helper to minimize boilerplate
 
 ```python
 from pathlib import Path
@@ -33,7 +65,7 @@ report = PipelineReport(label="OCR of pdfs",
 
 for file_path in Path("inputs/pdfs").glob("*.pdf"):
 
-    # The context manager handles and logs exceptions according to settings
+    # The context manager handles exceptions and auto-finalizes logs
     with pipeline_file(report, file_path) as file_report:
         with file_step(file_report, "extract_text", label="Extract text (OCR)") as step:
             extracted_text = extract_text(file_path) # user provided function
@@ -63,23 +95,55 @@ Yields `reports/progress.json` with a batch banner and per-file timelines.
 
 ## Key Concepts
 
-### Overview
+### **Batch → File → Step hierarchy**
 
-- Type safe (built on Pydantic v2) 
+`pipeline-watcher` organizes all logs into a strict, type-checked tree:
 
-- Thread-safe settings (built using contextvars) that can be set globally and overridden locally
+- **BatchReport** – high-level banner for an entire run
 
-- Robust serialization (handled by Pydantic model_dump_json)
+- **FileReport** – record associated with a single input file
 
-- Time monitoring built in (each step / file has automatic timing)
+- **StepReport** – individual processing steps inside a file
 
-- Minimal ceremony semantics
+Each node holds:
 
-- Small build size (min install only depends upon Pydantic+standard library)
+- timestamps
 
-- pipeline-watcher-site includes auto compile to HTML for rapid log review
+- duration
 
-- easily extensible / adaptable using abstract base.
+- comments/notes
+
+- metadata
+
+- warnings/errors
+
+- optional review flags
+
+### **HITL Review**
+
+Any step may request review by adding a *review step*, including:
+
+- reason string
+
+- metadata (confidence, heuristics, exceptions)
+
+- mark as required / optional
+
+- success or failure indicators
+
+### **Thread-Safe Global State**
+
+Settings such as `current_report` use `contextvars` to ensure:
+
+- safety in async environments
+
+- safety in multi-thread loops
+
+- no accidental global mutation
+
+### **Serialization**
+
+Serialization is handled internally by Pydantic. All you have to do is call save on the a PipelineReport instance.
 
 ### Abstract Base (optional pattern)
 
