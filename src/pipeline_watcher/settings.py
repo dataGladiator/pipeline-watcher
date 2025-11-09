@@ -200,6 +200,14 @@ class use_settings:
 
     def __enter__(self) -> WatcherSettings:
         base = current_settings()
+
+        # No-op reader path: return current settings without pushing a value
+        if not self._overrides:
+            self._effective = base
+            self._token = None
+            return base
+
+        # Override path: create merged settings and set them for this context
         eff = replace(base, **self._overrides)
         self._effective = eff
         self._token = _settings_var.set(eff)
