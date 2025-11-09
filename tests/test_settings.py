@@ -31,8 +31,8 @@ def test_defaults_are_expected():
 
 def test_is_immutable_frozen_dataclass():
     s = WatcherSettings()
-    with pytest.raises((AttributeError, TypeError)):
-        s.raise_on_exception = True  # frozen dataclass should prevent reassignment
+    with pytest.raises((AttributeError, TypeError)): # type: ignore[arg-type]
+        setattr(s, "raise_on_exception", True)
 
 
 def test_hashable_and_equality_semantics():
@@ -63,12 +63,20 @@ def test_custom_catch_and_reraise_types_accept_exception_subclasses():
 
 
 def test_global_update_affects_current_and_future_contexts():
+    # read the baseline, which is the module default
+    # current_settings() falls back to the current module default (_default_settings)
     base = current_settings()
-    assert base is not None
-    assert base.raise_on_exception is False
+    assert base is not None # confirms a WatcherSettings was returned
+    assert base.raise_on_exception is False # matches the module default
+
+    # Update the process-wide default by creating a new instance (D1) and
+    # also set _settings_var in THIS context to that new instance.
+    # here "this context" means "the current execution context of the main test thread".
     new = set_global_settings(raise_on_exception=True)
-    assert new.raise_on_exception is True
-    # current context sees it now
+    assert new.raise_on_exception is True # verify that the value was set.
+
+    # Now, because set_global_settings() called _settings_var.set(new),
+    # current_settings() returns the CONTEXT value (D1), not the fallback.
     assert current_settings().raise_on_exception is True
 
     # a fresh thread should also see the updated default
