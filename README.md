@@ -93,6 +93,16 @@ Yields `reports/progress.json` with a batch banner and per-file timelines.
 
 ---
 
+## Table of Contents
+
+- [Features](#features)
+- [Demo (Quick Glance)](#demo-quick-glance)
+- [Core Concepts](#core-concepts)
+- [HITL Review](#hitl-review)
+- [Installation](#installation)
+
+---
+
 ## Key Concepts
 
 ### **Batch → File → Step hierarchy**
