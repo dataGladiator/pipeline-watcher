@@ -1,4 +1,5 @@
-<img title="" src="file:///home/dgladiator/Work/pipeline-watcher/logos/pipeline-watcher-logo-white.webp" alt="pipeline-watcher-logo-white.webp" width="116">
+<img title="" src="docs/images/pipeline-watcher-logo-white.webp" alt="pipeline-watcher-logo-white.webp" width="116">
+
 
 # pipeline-watcher
 
