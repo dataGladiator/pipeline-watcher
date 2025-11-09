@@ -40,7 +40,7 @@ Features
 
 ---
 
-## ## Demo (Quick Glance)
+## Demo (Quick Glance)
 
 This example shows:
 
