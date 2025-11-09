@@ -1,20 +1,20 @@
+<img title="" src="file:///home/dgladiator/Work/pipeline-watcher/logos/pipeline-watcher-logo-white.webp" alt="pipeline-watcher-logo-white.webp" width="116">
+
 # pipeline-watcher
 
-`pipeline-watcher` is a lightweight alternative to traditional logging for **AI/ML
-pipelines**—with built‑in support for **HITL (Human‑In‑The‑Loop) review**.  
-Instead of unstructured logs, it emits **structured JSON reports** (batches → files → steps)
-that your UI (Jinja2, React, etc.) can render directly. Think of it as:
+`pipeline-watcher` is a lightweight type-safe, thread-safe, UI-ready, structured logger for **AI/ML/Scientific pipelines**—with built‑in support for **HITL (Human‑In‑The‑Loop) review**.  
+Instead of unstructured logs, it emits **structured, type-safe JSON reports** that capture comments, branches, errors, tracebacks, warnings and more for batches → files → steps that your UI can render directly. Included are Jinja2 templates and tools to transform the JSON logs into easily navigable HTML. Think of it as:
 
-> logs that the UI can read
+> type-safe, thread-safe structured logs for process and algorithm monitoring that can be viewed in your browser
 
-It models **batches**, **files**, and **steps**, plus optional **review flags** so you can
-surface “needs human review” right in your dashboards.
+`pipeline-watcher` is built upon Pydantic v2 in Python 3.10. It models **batches**, **files**, and **steps**, plus optional **review flags** so you can surface errors, warnings, output, comments and “needs human review” right in your browser.
 
 ---
 
 ## Demo (Quick Glance)
 
 This shows:
+
 - iterating over a directory of PDFs,
 - **comment replacement via notes** (your inline rationale becomes UI-visible),
 - **context managers** that **handle exceptions** and **auto-finalize** records,
@@ -23,63 +23,34 @@ This shows:
 
 ```python
 from pathlib import Path
-from pipeline_watcher import (
-    PipelineReport,
-    pipeline_file,   # per-file context manager
-    file_step,       # per-step (within a file) context manager
-)
+from user_lib import extract_text, index_text # user provided demo 
+from pipeline_watcher import PipelineReport, pipeline_file, file_step
 
-# Create a batch report
-report = PipelineReport(batch_id=42, kind="process", output_path="reports/progress.json")
-report.set_progress("discover", 5, "Scanning PDF directory…")
+report = PipelineReport(label="OCR of pdfs",
+                        kind="process",
+                        output_path="reports/progress.json")
 
-data_dir = "inputs/pdfs"
+for file_path in Path("inputs/pdfs").glob("*.pdf"):
 
-for file_path in Path(data_dir).glob("*.pdf"):
-    # Assume you have small helpers/wrappers with:
-    #   - meta() -> dict(file_id=..., path=..., name=...)
-    #   - extract_text() -> object with .text and .quality
-    #   - index_text(text) -> dict with indexing info
-    pdf_wrapper = get_pdf_wrapper(file_path)  # user-provided
-
-    # Context manager notes:
-    # - auto-finalizes the FileReport
-    # - on exception: records FAILED + traceback, and (by default) does NOT re-raise
-    #   so the loop continues to the next file
-    # - set save_on_exception=True to save the batch JSON immediately on error
-    with pipeline_file(
-        report,
-        **pdf_wrapper.meta(),
-        raise_on_exception=False,   # record error and continue (default)
-        save_on_exception=True,     # save report immediately on failure
-    ) as file_report:
-
-        # Step 1: OCR / text extraction
-        with file_step(file_report, "extract_text", label="Extract text (OCR)") as st:
-            extracted = pdf_wrapper.extract_text()
-            st.notes.append("Performed OCR on the PDF")
-            st.metadata["ocr_quality"] = extracted.quality
+    # The context manager handles and logs exceptions according to settings
+    with pipeline_file(report, file_path) as file_report:
+        with file_step(file_report, "extract_text", label="Extract text (OCR)") as step:
+            extracted_text = extract_text(file_path) # user provided function
+            step.notes.append("Performed OCR on the PDF")
+            step.metadata["ocr_quality"] = extracted_text.quality
 
             # Specific threshold decision with HITL:
-            if extracted.quality < 0.90:
-                st.notes.append("OCR quality below threshold (0.90) → request review")
+            if extracted_text.quality < 0.90:
+                step.notes.append("OCR quality below threshold (0.90) → request review")
                 file_report.add_review_step(
                     "Review OCR quality",
-                    reason=f"quality={extracted.quality:.2f} < 0.90",
-                    metadata={"quality": extracted.quality},
-                    mark_success=True,  # step 'succeeds' but asks for human review
+                    reason=f"quality={extracted_text.quality:.2f} < 0.90",
+                    metadata={"quality": extracted_text.quality},
+                    mark_success=extracted_text.quality >= 0.60,
                 )
             else:
-                st.notes.append("OCR quality meets threshold")
-
-        # Step 2: Indexing the extracted text (may raise; context manager records)
-        with file_step(file_report, "index_text", label="Index extracted text") as st:
-            info = pdf_wrapper.index_text(extracted.text)
-            st.notes.append("Indexed text for search")
-            st.metadata.update(info)
-
-        # Optional quick “log line” for bookkeeping
-        file_report.add_completed_step("Verified file exists")
+                step.notes.append("OCR quality meets threshold")
+            # continue processing file ...
 
 # Persist the whole batch report (direct write to output_path)
 report.save()
@@ -91,11 +62,27 @@ Yields `reports/progress.json` with a batch banner and per-file timelines.
 
 ## Key Concepts
 
+### Overview
+
+- Type safe (built on Pydantic v2) 
+
+- Thread-safe settings (built using contextvars) that can be set globally and overridden locally
+
+- Robust serialization (handled by Pydantic model_dump_json)
+
+- Time monitoring built in (each step / file has automatic timing)
+
+- Minimal ceremony semantics
+
+- Small build size (min install only depends upon Pydantic+standard library)
+
+- pipeline-watcher-site includes auto compile to HTML for rapid log review
+
+- easily extensible / adaptable using abstract base.
+
 ### Abstract Base (optional pattern)
 
-`StepReport` and `FileReport` share a common shape (status, timestamps, percent,
-notes, errors, metadata, optional review flag). If you want to enforce this across
-custom report types, you can introduce an abstract base (`ReportBase(abc.ABC)`) that declares:
+`StepReport` and `FileReport` share a common shape (status, timestamps, percent, notes, errors, metadata, optional review flag). If you want to enforce this across custom report types, you can introduce an abstract base (`ReportBase(abc.ABC)`) that declares:
 
 - `ok: bool` – whether the unit ultimately succeeded
 - `end()` – auto-finalize based on `ok`
