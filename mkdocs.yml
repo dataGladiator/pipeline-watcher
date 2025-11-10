@@ -9,6 +9,8 @@ theme:
     - navigation.top
     - navigation.footer
     - toc.integrate
+  logo: images/pipeline-watcher-small-logo.png
+  favicon: images/favicon/favicon.svg
   palette:
     # Auto-select based on user’s OS, but default to dark
     - media: "(prefers-color-scheme: dark)"
