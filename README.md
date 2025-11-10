@@ -154,22 +154,51 @@ Serialization is handled internally by Pydantic. All you have to do is call save
 
 The core object is the PipelineReport object. This object is actually a Pydantic v2 data model. Some of the core fields on this model are:
 
-- label: str (mandatory)
+- label: `str` — human-readable run label (**required**)
 
-- kind: Literal["validation", "process", "test"] (mandatory)
+- output_path: `Optional[Path]` — where the report is saved
 
-- output_path: Optional[Path]
+- kind: `{"validation", "process", "test"}` — category for UI/routing (defaults to `"process"`)
 
-- steps: List[StepReport]
+- steps: `List[StepReport]` — batch-level steps
 
-- files: List[FileReport]
+- files: `List[FileReport]` — per-file timelines
 
-Both label and kind are mandatory:
+Only label is mandatory:
 
 ```python
 from pipeline_watcher import PipelineReport
-report = PipelineReport("ocr-report", "process")
+report = PipelineReport(label="ocr-report",
+                        output_path=logs_dir / "progress.json")
+report.set_progress("initialization", 0)
+...
+report.save()
 ```
+
+`output_path` may be omitted, but providing one is **strongly recommended**, even for dry runs—especially if you intend to use context managers, since pipeline-watcher will autosave on exceptions.
+
+```python
+with pipeline_file(report, path_to_file) as file_report:
+    # ... process file
+    # ... suppose an exception is raised here, e.g.
+    raise ValueError("Processing file failed due to ...")
+```
+
+Under default settings, pipeline-watcher will:
+
+- **Autofinalize the file report**
+  
+  - status set to FAILED
+  
+  - exception type stored in errors
+  
+  - exception traceback stored in metadata
+  
+  - duration computed
+
+- **Insert the file report** into `report.files`
+
+- **Autosave the pipeline report** to `output_path` (or to the override configured in `WatcherSettings`or passed to `pipeline_file`).
 
 ## Code Structure
 
