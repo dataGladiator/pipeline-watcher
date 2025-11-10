@@ -6,6 +6,7 @@ db.sqlite3
 migrations/
 media/
 out/
+site/
 
 # secrets
 .env
