@@ -191,17 +191,15 @@ class PipelineReport(BaseModel):
     """
 
     label: str
-    kind: Literal["validation", "process", "test"]
+    output_path: Optional[Path] = None
+    kind: Literal["validation", "process", "test"] = "process"
     stage: str = ""
     percent: int = 0
     message: str = ""
     updated_at: datetime = Field(default_factory=_now)
     report_version: str = SCHEMA_VERSION
-
     steps: List[StepReport] = Field(default_factory=list)
     files: List[FileReport] = Field(default_factory=list)
-
-    output_path: Optional[Path] = None
 
     def save(
         self,
@@ -805,19 +803,16 @@ class FileReport(ReportBase):
 
     Attributes
     ----------
-    file_id : str
-        Stable identifier for the file (preferably unique within a batch).
     path : Path or None
         Source path or URI for display/debugging.
+    file_id (optional): str
+        Stable identifier for the file (preferably unique within a batch).
     steps : list[StepReport]
         Ordered step sequence (normally appended via helpers).
-    review : ReviewFlag
-        File-level HITL flag (rolled up from steps in :meth:`append_step`).
-    percent : int
-        Aggregate progress (average of step percents).
 
     Notes
     -----
+    See ReportBase for additional attributes, properties and methods
     The auto-generated initializer accepts the same fields as attributes.
     """
     model_config = {"extra": "forbid"}
@@ -827,18 +822,18 @@ class FileReport(ReportBase):
 
     @classmethod
     def begin(cls,
-              path: Path,
+              path: Path | str,
               file_id: str | None = None,
               metadata: dict | None = None
     ) -> "FileReport":
-        """Construct and mark the file report as started.
+        """Construct and mark the file report as running.
 
         Parameters
         ----------
-        file_id : str
+        path : Path
+            The path to file.
+        file_id (optional) : str
             Stable file identifier.
-        path (optional) : Path
-            Path to file.
         metadata (optional): dict
             Dictionary of metadata about the file.
 
@@ -847,7 +842,7 @@ class FileReport(ReportBase):
         FileReport
             Started file report (``status=RUNNING``).
         """
-        return cls(path=path,
+        return cls(path=Path(path),
                    file_id=file_id,
                    metadata=metadata).start()
 
