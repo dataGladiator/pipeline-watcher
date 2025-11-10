@@ -173,7 +173,9 @@ Serialization is handled internally by Pydantic. All you have to do is call save
 
 ## Quick Start
 
-#### Create a PipelineReport
+#### PipelineReport
+
+###### Create a PipelineReport
 
 The core object is the PipelineReport object. This object is actually a Pydantic v2 data model. Some of the core fields on this model are:
 
@@ -189,12 +191,11 @@ Only label is mandatory:
 from pipeline_watcher import PipelineReport
 report = PipelineReport(label="ocr-report",
                         output_path=logs_dir / "progress.json")
-report.set_progress("initialization", 0)
-...
-report.save()
 ```
 
 `output_path` may be omitted, but providing one is **strongly recommended**, even for dry runs—especially if you intend to use context managers, since pipeline-watcher will autosave on exceptions.
+
+###### Use a context manager
 
 ```python
 with pipeline_file(report, path_to_file) as file_report:
@@ -218,6 +219,25 @@ Under default settings, pipeline-watcher will:
 - **Insert the file report** into `report.files`
 
 - **Autosave the pipeline report** to `output_path` (or to the override configured in `WatcherSettings`or passed to `pipeline_file`).
+
+###### Set progress and save
+
+```python
+
+from pipeline_watcher import PipelineReport
+report = PipelineReport(label="ocr-report",
+                        output_path=logs_dir / "progress.json")
+
+report.set_progress("initialization", 0)
+files = [file_path in Path("/path/to/pdfs").rglob(f"*.pdf") if file_path.is_file()]
+n_files = len(files)
+for j, file_path in enumerate(files):
+    with pipeline_file(report, path_to_file) as file_report:
+        report.set_progress("loading file {file_path.stem}", j // n_files)
+        # process files...
+...
+report.save()
+```
 
 #### Manage Settings
 
