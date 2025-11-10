@@ -45,6 +45,27 @@ Key Features
 - [Demo (Quick Glance)](#demo-quick-glance)
 - [Features](#features)
 - [Quick Start](#quick-start)
+  - [PipelineReport](#pipelinereport)
+    
+    - [Create a PipelineReport](#create-a-pipelinereport)
+    - [Setting progress](#setting-progress)
+    - [Saving the report](#saving-the-report)
+  
+  - [Manage Settings](#manage-settings)
+    
+    - [Global settings](#global-settings)
+    - [Local overrides](#local-overrides)
+  
+  - [FileReport](#filereport)
+    
+    - [Processing a file](#processing-a-file)
+    - [Automatic error handling](#automatic-error-handling)
+    - [Capturing diagnostics](#capturing-diagnostics)
+  
+  - [StepReport](#stepreport)
+    
+    - [Recording steps inside a file](#recording-steps-inside-a-file)
+    - [Failure behavior](#failure-behavior)
 - [Code Structure](#code-structure)
 - [HITL Review](#hitl-review)
 - [Installation](#installation)
@@ -152,6 +173,8 @@ Serialization is handled internally by Pydantic. All you have to do is call save
 
 ## Quick Start
 
+#### Create a PipelineReport
+
 The core object is the PipelineReport object. This object is actually a Pydantic v2 data model. Some of the core fields on this model are:
 
 - label: `str` — human-readable run label (**required**)
@@ -159,10 +182,6 @@ The core object is the PipelineReport object. This object is actually a Pydantic
 - output_path: `Optional[Path]` — where the report is saved
 
 - kind: `{"validation", "process", "test"}` — category for UI/routing (defaults to `"process"`)
-
-- steps: `List[StepReport]` — batch-level steps
-
-- files: `List[FileReport]` — per-file timelines
 
 Only label is mandatory:
 
@@ -199,6 +218,65 @@ Under default settings, pipeline-watcher will:
 - **Insert the file report** into `report.files`
 
 - **Autosave the pipeline report** to `output_path` (or to the override configured in `WatcherSettings`or passed to `pipeline_file`).
+
+#### Manage Settings
+
+Most pipelines only need two things:
+
+###### Global settings
+
+`set_global_settings()` lets you configure watcher behavior once at the start of a script or application:
+
+```python
+from pipeline_watcher.settings import set_global_settings
+
+# Fail-fast mode (recommended for development & CI)
+set_global_settings(raise_on_exception=True)
+```
+
+These become the **default settings** for the entire process.  
+All pipelines and context managers inherit these values unless overridden.
+
+---
+
+###### Local overrides
+
+You can override any setting locally for a single file or step by passing them
+into `pipeline_file()` or `file_step()`:
+
+```python
+with pipeline_file(report,
+                   path="inputs/a.pdf",
+                   raise_on_exception=False):   # local override
+    ...
+```
+
+Local overrides apply **only inside that block** and do not affect anything else.
+
+This allows a simple pattern:
+
+- Set sensible global defaults for your script.
+- Override specific behavior only where needed.
+
+That's all you need to get started.  
+
+###### Additional settings:
+
+A few additional settings that might be of interest (see documentation for complete list):
+
+```python
+# Exception behavior
+raise_on_exception: bool = False
+store_traceback: bool = True
+
+# Routing policy
+suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
+fatal_exceptions: Tuple[Type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
+
+# Persistence policy
+save_on_exception: bool = True
+exception_save_path_override: Optional[str] = None
+```
 
 ## Code Structure
 
