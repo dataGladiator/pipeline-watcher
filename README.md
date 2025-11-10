@@ -58,6 +58,7 @@ Key Features
     
     - [Global settings](#global-settings)
     - [Local overrides](#local-overrides)
+    - [Additional settings](#additional-settings)
   
   - [FileReport](#filereport)
     
