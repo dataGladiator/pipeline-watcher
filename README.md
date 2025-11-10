@@ -20,7 +20,7 @@ The result is a clean, UI-ready log format that your browser or dashboard can re
 
 ---
 
-Features
+Key Features
 
 - **Type-safe models** for batches, files, and steps
 
@@ -37,6 +37,16 @@ Features
 - **Zero non-standard dependencies** (Pydantic + standard library only)
 
 - **pipeline-watcher-site**: optional companion for turning logs into navigable HTML
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Demo (Quick Glance)](#demo-quick-glance)
+- [Core Concepts](#core-concepts)
+- [HITL Review](#hitl-review)
+- [Installation](#installation)
 
 ---
 
@@ -87,17 +97,7 @@ Yields `reports/progress.json` with a batch banner and per-file timelines.
 
 ---
 
-## Table of Contents
-
-- [Features](#features)
-- [Demo (Quick Glance)](#demo-quick-glance)
-- [Core Concepts](#core-concepts)
-- [HITL Review](#hitl-review)
-- [Installation](#installation)
-
----
-
-## Key Concepts
+## Features
 
 ### **Batch → File → Step hierarchy**
 
