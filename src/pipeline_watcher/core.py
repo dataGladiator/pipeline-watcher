@@ -1576,11 +1576,13 @@ def pipeline_file(
         raise RuntimeError(
             "pipeline_file requires a PipelineReport: pass `pr=` or call within `with bind_pipeline(pr):`"
         )
+    if not isinstance(path, os.PathLike) and not isinstance(path, str):
+        raise ValueError(f"path must be str or os.PathLike, not {type(path)}")
     # Apply settings overrides (if any) only for this block
     with use_settings(**settings_overrides) as settings:
-        fr = FileReport.begin(path=Path(path) if path is not None else None,
+        fr = FileReport.begin(path=Path(path),
                               file_id=file_id,
-                              metadata=metadata if metadata else {})
+                              metadata=dict(metadata) if metadata else {})
         if set_stage_on_enter:
             pr.set_progress(stage=banner_stage or (fr.name or file_id),
                             percent=pr.percent,
@@ -1606,89 +1608,111 @@ def pipeline_file(
                 yield fr
                 fr.succeed()
             except BaseException as e:
+                # Enforce non-swallowable / limited-catch policies
+                if settings.reraise and isinstance(e, tuple(settings.reraise)):
+                    raise
+                if settings.catch and not isinstance(e, tuple(settings.catch)):
+                    raise
+
                 exc = e
                 fr.errors.append(f"{type(e).__name__}: {e}")
                 if settings.store_traceback:
                     tb = "".join(
-                        traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit)
-                    )
+                        traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit))
                     if tb:
                         fr.metadata["traceback"] = tb
                 fr.fail("Unhandled exception while processing file")
             finally:
-                # Persist simple diagnostics
-                if stdout_buf is not None:
-                    fr.metadata["stdout"] = stdout_buf.getvalue()
-                if stderr_buf is not None:
-                    fr.metadata["stderr"] = stderr_buf.getvalue()
-                if warn_list is not None:
-                    fr.metadata["warnings"] = [
-                        f"{w.category.__name__}: {w.message}" for w in warn_list  # type: ignore[attr-defined]
-                    ]
+                # ... capture stdout/stderr/warnings + duration/end + append_file + banner ...
 
-                fr.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
-                fr.end()
-
-                if pr is not None:
+                # Best-effort save-on-exception
+                if exc and settings.save_on_exception:
                     try:
-                        pr.append_file(fr)
-                        if banner_stage or banner_percent_on_exit is not None or banner_message_on_exit:
-                            pr.set_progress(
-                                stage=banner_stage or pr.stage,
-                                percent=pr.percent if banner_percent_on_exit is None else banner_percent_on_exit,
-                                message=banner_message_on_exit or pr.message,
-                            )
-                    finally:
-                        # Best-effort save-on-exception
-                        if exc and settings.save_on_exception:
-                            try:
-                                save_path = settings.exception_save_path_override or pr.output_path
-                                if save_path:
-                                    pr.save(save_path)
-                            except Exception as save_err:
-                                fr.warnings.append(f"save failed: {save_err!r}")
+                        save_path = settings.exception_save_path_override or pr.output_path
+                        if save_path:
+                            pr.save(save_path)
+                        else:
+                            fr.warnings.append("auto-save skipped: no output path configured")
+                    except Exception as save_err:
+                        fr.warnings.append(f"save failed: {save_err!r}")
 
+                # Re-raise if caller wants failures to bubble after recording
                 if exc and settings.raise_on_exception:
                     raise exc
 
 
 @contextmanager
-def file_step(file_report, id: str, *, label: str | None = None):
-    """Context manager for a **step inside a file**.
-
-    Creates a :class:`StepReport`, times it, captures exceptions (no re-raise),
-    and appends it to the provided :class:`FileReport`.
-
-    Parameters
-    ----------
-    file_report : FileReport
-        Parent file report to append the step to.
-    id : str
-        Machine-friendly step id (e.g., ``"extract_text"``).
-    label : str, optional
-        Human-friendly label for UI display.
-
-    Yields
-    ------
-    StepReport
-        The live step to populate within the ``with`` block.
-
-    Notes
-    -----
-    - Exceptions are recorded on the step and status set to ``FAILED``, but
-      the exception is not re-raised (so the file can continue recording).
-    - ``metadata['duration_ms']`` is recorded on exit.
+def file_step(
+    file_report: "FileReport",
+    id: str,
+    *,
+    label: str | None = None,
+    **maybe_settings_overrides,
+):
     """
-    st = StepReport.begin(id, label=label)
-    t0 = time.perf_counter()
-    try:
-        yield st
-        st.end()
-    except BaseException as e:
-        st.errors.append(f"{type(e).__name__}: {e}")
-        st.metadata["traceback"] = traceback.format_exc()
-        st.fail("Unhandled exception in file step")
-        # By default, do not re-raise so the file continues recording
-    finally:
-        st.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
-        file_report.append_step(st)
+    Context manager for a step inside a file, governed by WatcherSettings.
+
+    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True).
+    They apply only within this context; otherwise current settings are used.
+    """
+    # Filter only valid WatcherSettings keys
+    settings_overrides = {
+        k: v for k, v in maybe_settings_overrides.items() if k in _SETTINGS_KEYS
+    }
+
+    # Apply overrides (if any) for just this block; otherwise act as a reader
+    with use_settings(**settings_overrides) as settings:
+        st = StepReport.begin(id, label=label)
+        t0 = time.perf_counter()
+
+        # Optional capture (settings-driven)
+        stdout_buf = StringIO() if settings.capture_streams else None
+        stderr_buf = StringIO() if settings.capture_streams else None
+        warn_list: list[warnings.WarningMessage] | None = None
+
+        with ExitStack() as stack:
+            if settings.capture_warnings:
+                warn_list = stack.enter_context(warnings.catch_warnings(record=True))
+                warnings.simplefilter("default")
+            if settings.capture_streams:
+                if stdout_buf: stack.enter_context(redirect_stdout(stdout_buf))
+                if stderr_buf: stack.enter_context(redirect_stderr(stderr_buf))
+
+            exc: BaseException | None = None
+            try:
+                yield st
+                st.succeed()
+            except BaseException as e:
+                # Enforce explicit reraise / limited-catch policy
+                if settings.reraise and isinstance(e, tuple(settings.reraise)):
+                    raise
+                if settings.catch and not isinstance(e, tuple(settings.catch)):
+                    raise
+
+                exc = e
+                st.errors.append(f"{type(e).__name__}: {e}")
+                if settings.store_traceback:
+                    tb = "".join(
+                        traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit)
+                    )
+                    if tb:
+                        st.metadata["traceback"] = tb
+                st.fail("Unhandled exception in file step")
+            finally:
+                # Persist diagnostics
+                if stdout_buf is not None:
+                    st.metadata["stdout"] = stdout_buf.getvalue()
+                if stderr_buf is not None:
+                    st.metadata["stderr"] = stderr_buf.getvalue()
+                if warn_list is not None:
+                    st.metadata["warnings"] = [
+                        f"{w.category.__name__}: {w.message}" for w in warn_list  # type: ignore[attr-defined]
+                    ]
+
+                st.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
+                st.end()
+                file_report.append_step(st)
+
+                # Re-raise after recording if the caller wants failures to bubble
+                if exc and settings.raise_on_exception:
+                    raise exc
