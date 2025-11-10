@@ -74,7 +74,7 @@ for file_path in Path("inputs/pdfs").glob("*.pdf"):
 
             # Specific threshold decision with HITL:
             if extracted_text.quality < 0.90:
-                step.request_review("OCR quality below threshold (0.90):  ")
+                step.request_review(f"OCR quality below threshold (0.90): {extracted_text.quality:.2f} ")
             else:
                 step.notes.append("OCR quality meets threshold")
             # continue processing file ...
