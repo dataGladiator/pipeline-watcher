@@ -52,7 +52,7 @@ Key Features
     
     - [Create a PipelineReport](#create-a-pipelinereport)
     - [Use a context manager](#use-a-context-manager)
-    - [Set the progress and save](#set-the-progress-and-save)
+    - [Set progress and save](#set-progress-and-save)
   
   - [Manage Settings](#manage-settings)
     
