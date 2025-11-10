@@ -32,7 +32,7 @@ Key Features
 
 - **HITL review flags** for ambiguous or low-confidence outputs
 
-- **Robust serialization** via Pydantic’s `model_dump_json()`
+- **Robust serialization** handled via Pydantic’s `model_dump_json()`
 
 - **Zero non-standard dependencies** (Pydantic + standard library only)
 
@@ -42,9 +42,10 @@ Key Features
 
 ## Table of Contents
 
-- [Features](#features)
 - [Demo (Quick Glance)](#demo-quick-glance)
-- [Core Concepts](#core-concepts)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Code Structure](#code-structure)
 - [HITL Review](#hitl-review)
 - [Installation](#installation)
 
@@ -148,6 +149,29 @@ Settings such as `current_report` use `contextvars` to ensure:
 ### **Serialization**
 
 Serialization is handled internally by Pydantic. All you have to do is call save on the a PipelineReport instance.
+
+## Quick Start
+
+The core object is the PipelineReport object. This object is actually a Pydantic v2 data model. Some of the core fields on this model are:
+
+- label: str (mandatory)
+
+- kind: Literal["validation", "process", "test"] (mandatory)
+
+- output_path: Optional[Path]
+
+- steps: List[StepReport]
+
+- files: List[FileReport]
+
+Both label and kind are mandatory:
+
+```python
+from pipeline_watcher import PipelineReport
+report = PipelineReport("ocr-report", "process")
+```
+
+## Code Structure
 
 ### Abstract Base (optional pattern)
 
