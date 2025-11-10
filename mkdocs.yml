@@ -5,6 +5,7 @@ theme:
   name: material
   features:
     - content.code.copy
+    - content.code.annotate
     - navigation.top
     - navigation.footer
     - toc.integrate
@@ -43,6 +44,16 @@ plugins:
             filters:
               - "!^_"   # hide private names starting with underscore
   - include-markdown
+
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
 
 nav:
   - Overview: index.md
