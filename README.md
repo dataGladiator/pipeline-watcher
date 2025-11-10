@@ -43,13 +43,16 @@ Key Features
 ## Table of Contents
 
 - [Demo (Quick Glance)](#demo-quick-glance)
+
 - [Features](#features)
+
 - [Quick Start](#quick-start)
+  
   - [PipelineReport](#pipelinereport)
     
     - [Create a PipelineReport](#create-a-pipelinereport)
-    - [Setting progress](#setting-progress)
-    - [Saving the report](#saving-the-report)
+    - [Use a context manager](#use-a-context-manager)
+    - [Set the progress and save](#set-the-progress-and-save)
   
   - [Manage Settings](#manage-settings)
     
@@ -66,8 +69,11 @@ Key Features
     
     - [Recording steps inside a file](#recording-steps-inside-a-file)
     - [Failure behavior](#failure-behavior)
+
 - [Code Structure](#code-structure)
+
 - [HITL Review](#hitl-review)
+
 - [Installation](#installation)
 
 ---
@@ -223,7 +229,6 @@ Under default settings, pipeline-watcher will:
 ###### Set progress and save
 
 ```python
-
 from pipeline_watcher import PipelineReport
 report = PipelineReport(label="ocr-report",
                         output_path=logs_dir / "progress.json")
@@ -232,7 +237,7 @@ report.set_progress("initialization", 0)
 files = [file_path in Path("/path/to/pdfs").rglob(f"*.pdf") if file_path.is_file()]
 n_files = len(files)
 for j, file_path in enumerate(files):
-    with pipeline_file(report, path_to_file) as file_report:
+    with pipeline_file(report, file_path) as file_report:
         report.set_progress("loading file {file_path.stem}", j // n_files)
         # process files...
 ...
