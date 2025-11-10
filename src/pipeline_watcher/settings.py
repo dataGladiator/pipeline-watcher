@@ -67,9 +67,8 @@ class WatcherSettings:
     Parameters
     ----------
     raise_on_exception : bool, default False
-        If ``True``, re-raise exceptions after they are recorded. If ``False``,
-        exceptions are recorded and suppressed by default (subject to
-        :attr:`reraise` and :attr:`catch` policies).
+        If ``True``, re-raise exceptions not listed in suppressed_exceptions.
+        If ``False``, catch exceptions not listed in fatal_exceptions.
     store_traceback : bool, default True
         If ``True``, attach a formatted traceback string to metadata when
         exceptions occur.
@@ -81,13 +80,10 @@ class WatcherSettings:
         storing them in metadata for UI inspection.
     capture_warnings : bool, default True
         If ``True``, capture Python warnings emitted during watched blocks.
-
-    catch : tuple of Exception types or None, default None
-        If provided, only exceptions that are instances of these types will be
-        **caught** (others will be re-raised). If ``None``, the watcher will
-        catch all exceptions **except** those in :attr:`reraise`.
-    reraise : tuple of Exception types, default (KeyboardInterrupt, SystemExit)
-        Exceptions that must always be re-raised (i.e., never swallowed).
+    suppressed_exceptions : tuple of Exception types or None, default None
+        Exceptions that do not raise when `raise_on_exception=True` (always recorded).
+    fatal_exceptions : tuple of Exception types, default (KeyboardInterrupt, SystemExit)
+        Exceptions that are always raised (never suppressed).
 
     save_on_exception : bool, default True
         If ``True``, attempt to persist the pipeline report immediately on
@@ -115,14 +111,46 @@ class WatcherSettings:
     capture_warnings: bool = True
 
     # Routing policy
-    catch: Optional[Tuple[Type[BaseException], ...]] = None
-    reraise: Tuple[Type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
+    suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
+    fatal_exceptions: Tuple[Type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
 
     # Persistence policy
     save_on_exception: bool = True
     exception_save_path_override: Optional[str] = None
     min_seconds_between_exception_saves: float = 0.0
 
+    def is_fatal(self, e: BaseException) -> bool:
+        """True if e must always be raised (ignores raise_on_exception)."""
+        fx = self.fatal_exceptions
+        return bool(fx) and isinstance(e, fx)
+
+    def is_suppressed(self, e: BaseException) -> bool:
+        """True if e is allowed to NOT raise when raise_on_exception=True."""
+        sx = self.suppressed_exceptions
+        return bool(sx) and isinstance(e, sx)
+
+    def should_raise(self, e: BaseException) -> bool:
+        """
+        Decide whether to raise `e` according to the simplified policy:
+
+        1) Fatal exceptions always raise.
+        2) If raise_on_exception is True, raise unless e is suppressed.
+        3) Otherwise, do not raise (but always record).
+        """
+        if self.is_fatal(e):
+            return True
+        if self.raise_on_exception and not self.is_suppressed(e):
+            return True
+        return False
+
+    def suppression_breadcrumb(self, e: BaseException) -> Optional[str]:
+        """
+        Optional message explaining why an exception wasn't raised.
+        Returned only when raise_on_exception=True and e was suppressed.
+        """
+        if self.raise_on_exception and self.is_suppressed(e):
+            return f"suppressed raise_on_exception for {type(e).__name__} via suppressed_exceptions"
+        return None
 
 #: Module-level default settings used when no overrides are active.
 _default_settings = WatcherSettings()
