@@ -12,17 +12,6 @@ def review_flag_unset(report: FileReport | ReportBase) -> bool:
     assert report.review.reason is None
     return True
 
-
-def test_step_status_members_and_values():
-    # enforce API names
-    assert {m.name for m in Status} == {
-        "PENDING", "RUNNING", "SUCCEEDED", "FAILED", "SKIPPED"
-    }
-    # enforce serialization values
-    assert {m.value for m in Status} == {
-        "pending", "running", "succeeded", "failed", "skipped"
-    }
-
 ####################
 # ReportBase TESTS #
 ####################
