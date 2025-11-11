@@ -40,7 +40,7 @@ Key Features
 
 ---
 
-## Table of Contents
+# Table of Contents
 
 - [Demo (Quick Glance)](#demo-quick-glance)
 
@@ -62,9 +62,9 @@ Key Features
   
   - [FileReport](#filereport)
     
-    - [Processing a file](#processing-a-file)
-    - [Automatic error handling](#automatic-error-handling)
-    - [Capturing diagnostics](#capturing-diagnostics)
+    - [Getting started with files](#getting-started-with-files)
+    - [Use with PipelineReport](#use-with-pipelinereport)
+    - [FileReport Summary](#filereport-summary)
   
   - [StepReport](#stepreport)
     
@@ -180,9 +180,9 @@ Serialization is handled internally by Pydantic. All you have to do is call save
 
 ## Quick Start
 
-#### PipelineReport
+### PipelineReport
 
-###### Create a PipelineReport
+#### Create a PipelineReport
 
 The core object is the PipelineReport object. This object is actually a Pydantic v2 data model. Some of the core fields on this model are:
 
@@ -202,7 +202,7 @@ report = PipelineReport(label="ocr-report",
 
 `output_path` may be omitted, but providing one is **strongly recommended**, even for dry runs—especially if you intend to use context managers, since pipeline-watcher will autosave on exceptions.
 
-###### Use a context manager
+#### Use a context manager
 
 ```python
 with pipeline_file(report, path_to_file) as file_report:
@@ -227,7 +227,7 @@ Under default settings, pipeline-watcher will:
 
 - **Autosave the pipeline report** to `output_path` (or to the override configured in `WatcherSettings`or passed to `pipeline_file`).
 
-###### Set progress and save
+#### Set progress and save
 
 ```python
 from pipeline_watcher import PipelineReport
@@ -245,11 +245,11 @@ for j, file_path in enumerate(files):
 report.save()
 ```
 
-#### Manage Settings
+### Manage Settings
 
-Most pipelines only need two things:
+Most pipelines only need two ways to manage the settings: managing global settings, and managing local settings in specific contexts. We've provided convenient tools for both.
 
-###### Global settings
+#### Global settings
 
 `set_global_settings()` lets you configure watcher behavior once at the start of a script or application:
 
@@ -265,7 +265,7 @@ All pipelines and context managers inherit these values unless overridden.
 
 ---
 
-###### Local overrides
+#### Local overrides
 
 You can override any setting locally for a single file or step by passing them
 into `pipeline_file()` or `file_step()`:
@@ -286,7 +286,7 @@ This allows a simple pattern:
 
 That's all you need to get started.  
 
-###### Additional settings:
+#### Additional settings:
 
 A few additional settings that might be of interest (see documentation for complete list):
 
@@ -303,6 +303,113 @@ fatal_exceptions: Tuple[Type[BaseException], ...] = (KeyboardInterrupt, SystemEx
 save_on_exception: bool = True
 exception_save_path_override: Optional[str] = None
 ```
+
+## FileReport
+
+`FileReport` is the core object for tracking the processing lifecycle of a **single file**.  
+It automatically records:
+
+- lifecycle status (`RUNNING → SUCCEEDED/FAILED/SKIPPED`)
+- warnings, errors, notes
+- HITL review flags
+- **computed metadata**:
+  - `name` (from `path.name`)
+  - `mime_type` (extension-based)
+  - `size_bytes` (best-effort filesystem probe)
+
+All you need to create one is a filesystem path — no additional ceremony.
+
+---
+
+### Getting started with files
+
+```python
+from pipeline_watcher import FileReport
+
+fp = FileReport("/path/to/some/file")
+
+fp.note("Here is a note about this file")
+assert fp.running          # passes
+
+fp.warn("Here is a warning about this file")
+assert fp.running          # warnings do not change status
+
+fp.fail("File processing failed due to ...")
+assert fp.failed           # fail() sets FAILED + timestamps
+
+fp.request_review("Needs manual validation")
+assert fp.requires_human_review
+```
+
+---
+
+##### ✅ What FileReport gives you “for free”
+
+A `FileReport` automatically:
+
+- **tracks lifecycle state** (`RUNNING` → terminal state)
+- **timestamps** `started_at` and `finished_at`
+- safely probes:
+  - **file name** (`path.name`)
+  - **MIME type** (`mimetypes.guess_type`)
+  - **size in bytes** (`os.path.getsize`)
+- stores arbitrary structured metadata (`metadata` dict)
+- holds an ordered list of steps (`steps: List[StepReport]`)
+- supports HITL review workflows (`review.flagged`, roll-up to parent)
+
+All computed fields are **safe**: if the path cannot be probed (missing, inaccessible, remote), they simply return `None` without failing your pipeline.
+
+---
+
+##### ✅ Typical lifecycle
+
+```python
+fp = FileReport.begin("/tmp/some.pdf")
+
+# ... your processing logic ...
+fp.add_completed_step("Initial validation")
+fp.add_warning("Low resolution detected")
+
+if not fp.ok:
+    fp.fail("One or more checks failed")
+
+fp.end()       # infers success/failure if not already terminal
+fp_dict = fp.model_dump()  # ready for JSON serialization
+```
+
+---
+
+#### Use with PipelineReport
+
+`FileReport` objects are often created automatically by the higher-level `pipeline_file(...)` context manager:
+
+```python
+with pipeline_file(report, "/inputs/a.pdf") as fr:
+    fr.note("Running OCR…")
+    # raise ValueError("...") → automatically recorded, autosaved
+```
+
+This is the recommended way to use `FileReport` in real pipelines, since it captures:
+
+- stdout / stderr (optional)
+- warnings
+- exceptions + traceback
+- duration
+- banner updates
+- autosave-on-exception behavior (based on settings)
+
+---
+
+#### FileReport Summary
+
+`FileReport` is your “per-file audit log,” designed to:
+
+- require almost no input
+- behave predictably
+- serialize cleanly
+- automatically collect actionable metadata
+
+Use `FileReport.begin(path)` when manually controlling file-level logic, or let `pipeline_file()` manage it for you with full exception and setting handling.
 
 ## Code Structure
 
