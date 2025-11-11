@@ -18,11 +18,11 @@ def test_defaults_are_expected():
     assert s.capture_streams is False
     assert s.capture_warnings is True
 
-    assert s.catch is None
-    assert isinstance(s.reraise, tuple)
+    assert s.suppressed_exceptions is None
+    assert isinstance(s.fatal_exceptions, tuple)
     # Default should include KeyboardInterrupt and SystemExit
-    assert builtins.KeyboardInterrupt in s.reraise
-    assert builtins.SystemExit in s.reraise
+    assert builtins.KeyboardInterrupt in s.fatal_exceptions
+    assert builtins.SystemExit in s.fatal_exceptions
 
     assert s.save_on_exception is True
     assert s.exception_save_path_override is None
@@ -55,11 +55,11 @@ def test_replace_creates_new_instance_with_overrides():
 
 def test_custom_catch_and_reraise_types_accept_exception_subclasses():
     s = WatcherSettings(
-        catch=(ValueError, RuntimeError),
-        reraise=(KeyboardInterrupt, SystemExit, MemoryError),
+        suppressed_exceptions=(ValueError, RuntimeError),
+        fatal_exceptions=(KeyboardInterrupt, SystemExit, MemoryError),
     )
-    assert s.catch == (ValueError, RuntimeError)
-    assert MemoryError in s.reraise
+    assert s.suppressed_exceptions == (ValueError, RuntimeError)
+    assert MemoryError in s.fatal_exceptions
 
 
 def test_global_update_affects_current_and_future_contexts():
