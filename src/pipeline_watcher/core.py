@@ -5,7 +5,7 @@ status enums, and Pydantic models used across the reporting layer.
 
 The intent is to keep these pieces framework-agnostic and JSON-friendly.
 """
-
+# std lib imports
 from __future__ import annotations
 import os
 from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol, TypeVar
@@ -16,10 +16,14 @@ from io import StringIO
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from enum import Enum, auto
 from datetime import datetime
-from pydantic import BaseModel, Field, computed_field, model_validator, field_validator
 from pathlib import Path
 from dataclasses import fields
 import mimetypes
+
+# third party import
+from pydantic import BaseModel, Field, computed_field, model_validator, field_validator, ConfigDict
+
+# local imports
 from .clocks import now_utc as _now
 from .utilities import _slugify, _file_keys, _norm_key
 from .settings import WatcherSettings, use_settings
@@ -596,6 +600,28 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     review: ReviewFlag = Field(default_factory=ReviewFlag)
     report_version: str = SCHEMA_VERSION
+    defer_start: bool = Field(default=False, exclude=True, repr=False)
+
+    @computed_field
+    @property
+    def duration_ms(self) -> Optional[float]:
+        """
+        Elapsed time in milliseconds.
+
+        Returns None if timing cannot be determined (e.g., no started_at).
+        Uses finished_at when present; otherwise uses 'now' to reflect
+        in-flight duration. Clamped at >= 0 and rounded to 3 decimals.
+        """
+        if not self.started_at:
+            return None
+        end = self.finished_at or _now()
+        delta_ms = (end - self.started_at).total_seconds() * 1000.0
+        return round(max(delta_ms, 0.0), 3)
+
+    def model_post_init(self, __context) -> None:
+        # auto-start unless caller explicitly defers
+        if not self.defer_start and self.pending:
+            self.start()
 
     def start(self) -> "ReportBase":
         """Mark the unit as running and stamp ``started_at`` if missing.
@@ -815,7 +841,7 @@ class FileReport(ReportBase):
     See ReportBase for additional attributes, properties and methods
     The auto-generated initializer accepts the same fields as attributes.
     """
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra='forbid')
     path: Path
     file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
@@ -844,7 +870,7 @@ class FileReport(ReportBase):
         """
         return cls(path=Path(path),
                    file_id=file_id,
-                   metadata=metadata).start()
+                   metadata=dict(metadata) if metadata else None).start()
 
     def append_step(self, step: StepReport) -> "FileReport":
         """Finalize and append a step; recompute aggregate percent.
@@ -934,14 +960,14 @@ class FileReport(ReportBase):
         -------
         bool
             ``False`` if status is ``FAILED`` or any errors exist.
-            ``True`` if status is ``SUCCESS``.
+            ``True`` if status is ``SUCCEEDED``.
             Otherwise, ``all(step.ok for step in steps)`` (or ``True`` if no steps).
         """
         # Failure wins
-        if self.status == Status.FAILED or self.errors:
+        if self.failed or self.errors:
             return False
         # Explicit success wins
-        if self.status.succeeded:
+        if self.succeeded:
             return True
         # Otherwise roll up from steps (if any)
         return all(s.ok for s in self.steps) if self.steps else True
@@ -1023,7 +1049,7 @@ class FileReport(ReportBase):
         note: str | None = None,
         metadata: dict | None = None,
     ) -> "FileReport":
-        """Create a ``SUCCESS`` step and append it (chainable).
+        """Create a ``SUCCEEDED`` step and append it (chainable).
 
         Parameters
         ----------
@@ -1031,7 +1057,7 @@ class FileReport(ReportBase):
             Step label for UI.
         id : str, optional
             Explicit step id; if omitted, a unique id is derived from ``label``.
-        note : str, optional
+        note (optional): str
             Optional note appended to the step.
         metadata : dict, optional
             Metadata merged into the step.
@@ -1173,7 +1199,7 @@ class FileReport(ReportBase):
                 out.append(s)
         return out
 
-    @computed_field(return_type=bool)  # included in model_dump / JSON
+    @computed_field  # included in model_dump / JSON
     def requires_human_review(self) -> bool:
         """Whether this file needs human review (computed).
 
@@ -1188,7 +1214,7 @@ class FileReport(ReportBase):
             return True
         return any(True for _ in self._flagged_steps())
 
-    @computed_field(return_type=Optional[str])  # included in model_dump / JSON
+    @computed_field  # included in model_dump / JSON
     def human_review_reason(self) -> Optional[str]:
         """Compact human-readable reason summarizing review needs (computed).
 
@@ -1448,7 +1474,6 @@ def pipeline_step(
       - ``errors += [\"{Type}: {message}\"]``
       - ``metadata['traceback'] = traceback.format_exc()``
       - status set to ``FAILED`` via ``st.fail(...)``
-    - ``metadata['duration_ms']`` is recorded on exit.
     - If a pipeline is available, the step is finalized via ``st.end()``,
       appended with :meth:`PipelineReport.append_step`, and the banner is
       optionally updated.
@@ -1489,7 +1514,6 @@ def pipeline_step(
         st.metadata["traceback"] = traceback.format_exc()
         st.fail("Unhandled exception")
     finally:
-        st.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
 
         if pr is not None:
             try:
@@ -1644,9 +1668,6 @@ def pipeline_file(
                         f"{w.category.__name__}: {w.message}"  # type: ignore[attr-defined]
                         for w in warn_list
                     ]
-
-                # Duration + finalize file report
-                fr.metadata["duration_ms"] = round((time.perf_counter() - t0) * 1000, 3)
                 fr.end()
 
                 # Append to pipeline and (optionally) update banner on exit
@@ -1697,7 +1718,6 @@ def file_step(
     # Apply overrides (if any) for just this block; otherwise act as a reader
     with use_settings(**settings_overrides) as settings:
         st = StepReport.begin(id, label=label)
-        t0 = time.perf_counter()
 
         # Optional capture (settings-driven)
         stdout_buf = StringIO() if settings.capture_streams else None
@@ -1716,8 +1736,6 @@ def file_step(
                 yield st
                 st.succeed()
             except BaseException as e:
-                # Always record first
-                exc = e
                 st.errors.append(f"{type(e).__name__}: {e}")
                 if settings.store_traceback:
                     tb = "".join(traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit))
