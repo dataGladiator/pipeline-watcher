@@ -9,6 +9,7 @@ theme:
     - navigation.top
     - navigation.footer
     - toc.integrate
+    - toc.follow
   logo: images/pipeline-watcher-small-logo.png
   favicon: images/favicon/favicon.svg
   palette:
@@ -56,6 +57,9 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.snippets
   - pymdownx.superfences
+  - toc:
+      permalink: true
+      toc_depth: 4
 
 nav:
   - Overview: index.md

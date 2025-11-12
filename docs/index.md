@@ -1,7 +1,8 @@
 ---
 title: pipeline-watcher
-hide: [toc]
+template: main.html
+
 ---
 
-{% include-markdown "../README.md" %}
+{% include-markdown "../README.md" heading-offset=1 %}
 

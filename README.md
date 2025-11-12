@@ -1,6 +1,6 @@
 <img title="" src="docs/images/pipeline-watcher-logo-white.webp" alt="pipeline-watcher-logo-white.webp" width="116">
 
-# pipeline-watcher
+## pipeline-watcher
 
 `pipeline-watcher` is a lightweight, type-safe, thread-safe structured logger for **AI/ML and scientific pipelines**, built on **Pydantic v2**. Instead of free-form text logs, it produces **structured JSON reports** that capture:
 
@@ -40,7 +40,7 @@ Key Features
 
 ---
 
-# Table of Contents
+## Table of Contents
 
 - [Demo (Quick Glance)](#demo-quick-glance)
 
