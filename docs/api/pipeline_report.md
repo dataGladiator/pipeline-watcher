@@ -1,4 +1,3 @@
-# Pipeline
+# PipelineReport
 
 ::: pipeline_watcher.PipelineReport
-
