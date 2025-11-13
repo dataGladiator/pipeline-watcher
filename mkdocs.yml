@@ -38,15 +38,15 @@ plugins:
             docstring_style: numpy
 
             # DOCSTRINGS -------------------------------------------------------------
-            docstring_options:
+            # docstring_options:
 
             # Tables are generally too large, lists will fix this.
             docstring_section_style: list
 
             # CROSS-REFERENCES -------------------------------------------------------
             # Enable relative crossrefs and scoped crossrefs, see Docstrings options.
-            relative_crossrefs: true  # Sponsors only!
-            scoped_crossrefs: true  # Sponsors only!
+#            relative_crossrefs: true  # Sponsors only!
+#            scoped_crossrefs: true  # Sponsors only!
 
             # Enable cross-references in signatures.
             signature_crossrefs: true
@@ -57,15 +57,6 @@ plugins:
             # MEMBERS ----------------------------------------------------------------
             # Only render pulic symbols.
             filters: public  # Sponsors only!
-            # Comment the option otherwise to get the default filters.
-
-            # Show class inherited members.
-            inherited_members: false
-
-            # Render auto-generated summaries of attributes, functions, etc.
-            # at the start of each symbol's documentation.
-            summary: true
-
             # HEADINGS ---------------------------------------------------------------
             # For auto-generated pages, one module per page,
             # make the module heading be the H1 heading of the page.
@@ -114,12 +105,13 @@ plugins:
             backlinks: tree  # Sponsors only!
 
             # Show base classes OR inheritance diagram.
-            show_bases: false
+            show_bases: true
             show_root_toc_entry: false
 #
 #            # ✅ use recognized top-level options (no 'selection:' block)
+            summary: true
             members: true
-            inherited_members: false  # Prevents child methods from appearing under base
+            inherited_members: true  # Prevents child methods from appearing under base
 #            merge_init_into_class: false  # Avoids confusion with __init__
 #            filters:
 #              - "!^_"   # hide private names starting with underscore

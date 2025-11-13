@@ -161,8 +161,8 @@ class PipelineReport(BaseModel):
 
     Designed to be JSON-serializable (Pydantic v2) and UI-friendly. Maintains
     a progress banner (``stage``, ``percent``, ``message``, ``updated_at``),
-    an ordered list of batch-level :class:`StepReport` items, and a list of
-    :class:`FileReport` records.
+    an ordered list of batch-level [StepReport](file_step.md#StepReport) items, and a list of
+    [FileReport](file_step.md#FileReport) records.
 
     Attributes
     ----------
@@ -582,6 +582,19 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
     report_version : str
         Schema version written to JSON artifacts.
 
+    duration_ms (property) : Optional[float]
+        Elapsed time in milliseconds.
+    failed (property): bool
+        Return `True` if the unit has failed.
+    pending (property): bool
+        Return `True` if the unit is pending.
+    running (property): bool
+        Return `True` if the unit is running.
+    skipped (property): bool
+        Return `True` if the unit was skipped.
+    succeeded (property): bool
+        Return `True` if the unit has succeeded.
+
     See Also
     --------
     StepReport
@@ -601,22 +614,6 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
     review: ReviewFlag = Field(default_factory=ReviewFlag)
     report_version: str = SCHEMA_VERSION
     defer_start: bool = Field(default=False, exclude=True, repr=False)
-
-    @computed_field
-    @property
-    def duration_ms(self) -> Optional[float]:
-        """
-        Elapsed time in milliseconds.
-
-        Returns None if timing cannot be determined (e.g., no started_at).
-        Uses finished_at when present; otherwise uses 'now' to reflect
-        in-flight duration. Clamped at >= 0 and rounded to 3 decimals.
-        """
-        if not self.started_at:
-            return None
-        end = self.finished_at or _now()
-        delta_ms = (end - self.started_at).total_seconds() * 1000.0
-        return round(max(delta_ms, 0.0), 3)
 
     def model_post_init(self, __context) -> None:
         # auto-start unless caller explicitly defers
@@ -711,22 +708,6 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         self.notes.append(msg)
         return self
 
-    def warn(self, msg: str) -> "ReportBase":
-        """Append a non-fatal warning.
-
-        Parameters
-        ----------
-        msg : str
-            Message to append to :attr:`warnings`.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.warnings.append(msg)
-        return self
-
     def error(self, msg: str) -> "ReportBase":
         """Append an error message (does not change status).
 
@@ -751,39 +732,6 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         """
         self.errors.append(msg)
         return self
-
-    @property
-    @abstractmethod
-    def ok(self) -> bool:
-        """Truthiness of success when inferring status.
-
-        Subclasses define the success condition used by :meth:`end`
-        when the unit is not already in a terminal status. Typical
-        implementations derive this from fields like ``errors``,
-        ``checks`` (for steps), or child statuses (for files/batches).
-
-        Returns
-        -------
-        bool
-            ``True`` if the unit should be considered successful.
-        """
-        raise NotImplementedError
-
-    @property
-    def running(self):
-        return self.status.running
-
-    @property
-    def failed(self):
-        return self.status.failed
-
-    @property
-    def skipped(self):
-        return self.status.skipped
-
-    @property
-    def succeeded(self):
-        return self.status.succeeded
 
     def end(self) -> "ReportBase":
         """Finalize the unit if not already terminal.
@@ -817,6 +765,85 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         return self.succeed() if self.ok else self.fail(
             "One or more checks failed" if self.errors or hasattr(self, "checks") else "Step failed"
         )
+
+    def warn(self, msg: str) -> "ReportBase":
+        """Append a non-fatal warning.
+
+        Parameters
+        ----------
+        msg : str
+            Message to append to :attr:`warnings`.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.warnings.append(msg)
+        return self
+
+    @property
+    @abstractmethod
+    def ok(self) -> bool:
+        """Truthiness of success when inferring status.
+
+        Subclasses define the success condition used by :meth:`end`
+        when the unit is not already in a terminal status. Typical
+        implementations derive this from fields like ``errors``,
+        ``checks`` (for steps), or child statuses (for files/batches).
+
+        Returns
+        -------
+        bool
+            ``True`` if the unit should be considered successful.
+        """
+        raise NotImplementedError
+
+    @computed_field
+    @property
+    def duration_ms(self) -> Optional[float]:
+        """
+        Elapsed time in milliseconds.
+
+        Returns None if timing cannot be determined (e.g., no started_at).
+        Uses finished_at when present; otherwise uses 'now' to reflect
+        in-flight duration. Clamped at >= 0 and rounded to 3 decimals.
+        """
+        if not self.started_at:
+            return None
+        end = self.finished_at or _now()
+        delta_ms = (end - self.started_at).total_seconds() * 1000.0
+        return round(max(delta_ms, 0.0), 3)
+
+    @property
+    def failed(self) -> bool:
+        """Return ``True`` if the unit has failed."""
+        return self.status.failed
+
+    @property
+    def pending(self):
+        """Return ``True`` if the unit is pending."""
+        return self.status.pending
+
+    @property
+    def running(self):
+        """Return ``True`` if the unit is running."""
+        return self.status.running
+
+    @property
+    def skipped(self):
+        """Return ``True`` if the unit was skipped."""
+        return self.status.skipped
+
+    @property
+    def succeeded(self):
+        """Return ``True`` if the unit has succeeded."""
+        return self.status.succeeded
+
+    @property
+    def terminal(self):
+        """Return ``True`` if the unit is terminal."""
+        return self.status.terminal
 
 
 class FileReport(ReportBase):
@@ -870,7 +897,7 @@ class FileReport(ReportBase):
         """
         return cls(path=Path(path),
                    file_id=file_id,
-                   metadata=dict(metadata) if metadata else None).start()
+                   metadata=dict(metadata) if metadata else {}).start()
 
     def append_step(self, step: StepReport) -> "FileReport":
         """Finalize and append a step; recompute aggregate percent.
