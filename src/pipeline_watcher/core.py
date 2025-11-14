@@ -642,37 +642,23 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         return self
 
     def end(self) -> "ReportBase":
-        """Finalize the unit if not already terminal.
+        """Finalize the file if not already terminal.
 
-        If the current :attr:`status` is in a terminal state
-        (``SUCCEEDED``, ``FAILED``, ``SKIPPED``), this stamps
-        :attr:`finished_at` if missing and returns immediately.
-
-        Otherwise, it infers success from :attr:`ok`:
-        - If ``ok`` is ``True``, calls :meth:`succeed`.
-        - If ``ok`` is ``False``, calls :meth:`fail` with a reason:
-          * ``"One or more checks failed"`` if there are recorded
-            :attr:`errors` or a ``checks`` attribute exists.
-          * Otherwise ``"Step failed"``.
+        If already terminal (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
+        :attr:`finished_at` if missing and returns. Otherwise, infers success
+        from :attr:`ok` (roll-up of step outcomes) and calls :meth:`succeed`
+        or :meth:`fail` accordingly.
 
         Returns
         -------
         ReportBase
             Self.
-
-        Notes
-        -----
-        This method does **not** raise; it only records terminal state
-        and timestamps. Exception handling is managed by higher-level
-        context managers (e.g., ``pipeline_step`` / ``file_step``).
         """
         if self.status.terminal:
             if not self.finished_at:
                 self.finished_at = _now()
             return self
-        return self.succeed() if self.ok else self.fail(
-            "One or more checks failed" if self.errors or hasattr(self, "checks") else "Step failed"
-        )
+        return self.succeed() if self.ok else self.fail("One or more file steps failed")
 
     def fail(self, message: Optional[str] = None) -> "ReportBase":
         """Finalize as failed (``FAILED``).
@@ -1086,25 +1072,6 @@ class FileReport(ReportBase):
             Last step in :attr:`steps`, if any.
         """
         return self.steps[-1] if self.steps else None
-
-    def end(self) -> "FileReport":
-        """Finalize the file if not already terminal.
-
-        If already terminal (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
-        :attr:`finished_at` if missing and returns. Otherwise, infers success
-        from :attr:`ok` (roll-up of step outcomes) and calls :meth:`succeed`
-        or :meth:`fail` accordingly.
-
-        Returns
-        -------
-        FileReport
-            Self.
-        """
-        if self.status.terminal:
-            if not self.finished_at:
-                self.finished_at = _now()
-            return self
-        return self.succeed() if self.ok else self.fail("One or more file steps failed")
 
     @property
     def ok(self) -> bool:
