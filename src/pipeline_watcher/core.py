@@ -857,12 +857,18 @@ class FileReport(ReportBase):
 
     Attributes
     ----------
-    path : Path or None
+    path (required) : Path or None
         Source path or URI for display/debugging.
-    file_id (optional): str
+    file_id : str
         Stable identifier for the file (preferably unique within a batch).
     steps : list[StepReport]
         Ordered step sequence (normally appended via helpers).
+    requires_human_review (property): bool
+        Whether this file needs human review (computed)
+    human_review_reason (property): str
+        Compact human-readable reason summarizing review needs (computed).
+    size_bytes (property): Optional[int]
+        Best-effort determination of file's size in bytes.
 
     Notes
     -----
@@ -873,201 +879,6 @@ class FileReport(ReportBase):
     path: Path
     file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
-
-    @classmethod
-    def begin(cls,
-              path: Path | str,
-              file_id: str | None = None,
-              metadata: dict | None = None
-    ) -> "FileReport":
-        """Construct and mark the file report as running.
-
-        Parameters
-        ----------
-        path : Path
-            The path to file.
-        file_id (optional) : str
-            Stable file identifier.
-        metadata (optional): dict
-            Dictionary of metadata about the file.
-
-        Returns
-        -------
-        FileReport
-            Started file report (``status=RUNNING``).
-        """
-        return cls(path=Path(path),
-                   file_id=file_id,
-                   metadata=dict(metadata) if metadata else {}).start()
-
-    def append_step(self, step: StepReport) -> "FileReport":
-        """Finalize and append a step; recompute aggregate percent.
-
-        The step is finalized via :meth:`StepReport.end`, appended to
-        :attr:`steps`, and the file percent is updated as the arithmetic
-        mean of child step percents. If the step requests HITL review and
-        the file is not already flagged, the file's :attr:`review` is set.
-
-        Parameters
-        ----------
-        step : StepReport
-            Step to finalize and append.
-
-        Returns
-        -------
-        FileReport
-            Self (chainable).
-        """
-        step.end()
-        self.steps.append(step)
-        self._recompute_percent()
-        # roll-up HITL review if you added ReviewFlag earlier
-        if step.review.flagged and not self.review.flagged:
-            self.review = ReviewFlag(flagged=True,
-                                     reason=step.review.reason or f"Step '{step.id}' requested review")
-        return self
-
-    def add_step(self, id: str, *, label: str | None = None) -> StepReport:
-        """Create a started step, immediately finalize, append, and return it.
-
-        Useful when callers want to modify the returned step's metadata
-        before using it elsewhere, but still record a terminal snapshot now.
-
-        Parameters
-        ----------
-        id : str
-            Step identifier.
-        label : str, optional
-            Human-friendly label.
-
-        Returns
-        -------
-        StepReport
-            The created (and ended) step.
-        """
-        step = StepReport.begin(id, label=label)
-        step.end()
-        self.steps.append(step)
-        self._recompute_percent()
-        return step
-
-    def last_step(self) -> StepReport | None:
-        """Return the most recently appended step or ``None`` if empty.
-
-        Returns
-        -------
-        StepReport or None
-            Last step in :attr:`steps`, if any.
-        """
-        return self.steps[-1] if self.steps else None
-
-    def end(self) -> "FileReport":
-        """Finalize the file if not already terminal.
-
-        If already terminal (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
-        :attr:`finished_at` if missing and returns. Otherwise, infers success
-        from :attr:`ok` (roll-up of step outcomes) and calls :meth:`succeed`
-        or :meth:`fail` accordingly.
-
-        Returns
-        -------
-        FileReport
-            Self.
-        """
-        if self.status.terminal:
-            if not self.finished_at:
-                self.finished_at = _now()
-            return self
-        return self.succeed() if self.ok else self.fail("One or more file steps failed")
-
-    @property
-    def ok(self) -> bool:
-        """Truthiness of success used by :meth:`end`.
-
-        Returns
-        -------
-        bool
-            ``False`` if status is ``FAILED`` or any errors exist.
-            ``True`` if status is ``SUCCEEDED``.
-            Otherwise, ``all(step.ok for step in steps)`` (or ``True`` if no steps).
-        """
-        # Failure wins
-        if self.failed or self.errors:
-            return False
-        # Explicit success wins
-        if self.succeeded:
-            return True
-        # Otherwise roll up from steps (if any)
-        return all(s.ok for s in self.steps) if self.steps else True
-
-    @computed_field
-    @property
-    def name(self) -> str:
-        # read-only, derived; not persisted unless you include computed fields explicitly
-        return self.path.name
-
-    @field_validator("path", mode="before")
-    @classmethod
-    def _coerce_path(cls, v):
-        if isinstance(v, (str, Path)):
-            p = Path(v)
-            if str(p) == "":
-                raise ValueError("path cannot be empty")
-            return p
-        raise TypeError("path must be str or Path")
-
-    @computed_field
-    @property
-    def mime_type(self) -> Optional[str]:
-        # Extension-based guess; no filesystem touch
-        mt, _ = mimetypes.guess_type(self.path.as_posix())
-        return mt
-
-    @computed_field
-    @property
-    def size_bytes(self) -> Optional[int]:
-        # Best-effort; avoid raising on missing/inaccessible paths
-        try:
-            # Use os.path.getsize for slightly cheaper syscall than full stat attr unpack
-            return os.path.getsize(self.path)
-        except Exception:
-            return None
-
-    def _recompute_percent(self) -> None:
-        """Recompute :attr:`percent` as the arithmetic mean of step percents.
-
-        Notes
-        -----
-        Steps without explicit ``percent`` default to ``0``; consider
-        setting percents for long-running steps if you want smoother UI.
-        """
-        if self.steps:
-            self.percent = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
-
-    def _make_unique_step_id(self, label: str) -> str:
-        """Generate a slugified, unique step id based on a label.
-
-        If the slug already exists among current steps, appends ``-2``, ``-3``,
-        etc., until unique.
-
-        Parameters
-        ----------
-        label : str
-            Human-readable label to slugify.
-
-        Returns
-        -------
-        str
-            Unique step identifier.
-        """
-        base = _slugify(label) or "step"
-        existing = {s.id for s in self.steps}
-        if base not in existing:
-            return base
-        i = 2
-        while f"{base}-{i}" in existing:
-            i += 1
-        return f"{base}-{i}"
 
     def add_completed_step(
         self,
@@ -1212,22 +1023,135 @@ class FileReport(ReportBase):
         # If your append_step rolls review up to the FileReport, that'll happen there.
         return self.append_step(step)
 
-    def _flagged_steps(self) -> List[StepReport]:
-        """Return steps that have requested human review.
+    def append_step(self, step: StepReport) -> "FileReport":
+        """Finalize and append a step; recompute aggregate percent.
+
+        The step is finalized via :meth:`StepReport.end`, appended to
+        :attr:`steps`, and the file percent is updated as the arithmetic
+        mean of child step percents. If the step requests HITL review and
+        the file is not already flagged, the file's :attr:`review` is set.
+
+        Parameters
+        ----------
+        step : StepReport
+            Step to finalize and append.
 
         Returns
         -------
-        list[StepReport]
-            Subset of :attr:`steps` whose ``review.flagged`` is ``True``.
+        FileReport
+            Self (chainable).
         """
-        out = []
-        for s in self.steps:
-            rf = getattr(s, "review", None)
-            if rf and getattr(rf, "flagged", False):
-                out.append(s)
-        return out
+        step.end()
+        self.steps.append(step)
+        self._recompute_percent()
+        # roll-up HITL review if you added ReviewFlag earlier
+        if step.review.flagged and not self.review.flagged:
+            self.review = ReviewFlag(flagged=True,
+                                     reason=step.review.reason or f"Step '{step.id}' requested review")
+        return self
 
-    @computed_field  # included in model_dump / JSON
+    @classmethod
+    def begin(cls,
+              path: Path | str,
+              file_id: str | None = None,
+              metadata: dict | None = None
+    ) -> "FileReport":
+        """Construct and mark the file report as running.
+
+        Parameters
+        ----------
+        path : Path
+            The path to file.
+        file_id (optional) : str
+            Stable file identifier.
+        metadata (optional): dict
+            Dictionary of metadata about the file.
+
+        Returns
+        -------
+        FileReport
+            Started file report (``status=RUNNING``).
+        """
+        return cls(path=Path(path),
+                   file_id=file_id,
+                   metadata=dict(metadata) if metadata else {}).start()
+
+
+    def last_step(self) -> StepReport | None:
+        """Return the most recently appended step or ``None`` if empty.
+
+        Returns
+        -------
+        StepReport or None
+            Last step in :attr:`steps`, if any.
+        """
+        return self.steps[-1] if self.steps else None
+
+    def end(self) -> "FileReport":
+        """Finalize the file if not already terminal.
+
+        If already terminal (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
+        :attr:`finished_at` if missing and returns. Otherwise, infers success
+        from :attr:`ok` (roll-up of step outcomes) and calls :meth:`succeed`
+        or :meth:`fail` accordingly.
+
+        Returns
+        -------
+        FileReport
+            Self.
+        """
+        if self.status.terminal:
+            if not self.finished_at:
+                self.finished_at = _now()
+            return self
+        return self.succeed() if self.ok else self.fail("One or more file steps failed")
+
+    @property
+    def ok(self) -> bool:
+        """Truthiness of success used by :meth:`end`.
+
+        Returns
+        -------
+        bool
+            ``False`` if status is ``FAILED`` or any errors exist.
+            ``True`` if status is ``SUCCEEDED``.
+            Otherwise, ``all(step.ok for step in steps)`` (or ``True`` if no steps).
+        """
+        # Failure wins
+        if self.failed or self.errors:
+            return False
+        # Explicit success wins
+        if self.succeeded:
+            return True
+        # Otherwise roll up from steps (if any)
+        return all(s.ok for s in self.steps) if self.steps else True
+
+    @computed_field
+    @property
+    def name(self) -> str:
+        # read-only, derived; not persisted unless you include computed fields explicitly
+        return self.path.name
+
+    @computed_field
+    @property
+    def mime_type(self) -> Optional[str]:
+        # Extension-based guess; no filesystem touch
+        mt, _ = mimetypes.guess_type(self.path.as_posix())
+        return mt
+
+    @computed_field
+    @property
+    def size_bytes(self) -> Optional[int]:
+        """Best-effort determination of file's size in bytes.
+        Avoid raising on missing/inaccessible paths."""
+        try:
+            # Use os.path.getsize for slightly cheaper syscall than full stat attr unpack
+            return os.path.getsize(self.path)
+        except Exception:
+            return None
+
+    @computed_field
+    @property
     def requires_human_review(self) -> bool:
         """Whether this file needs human review (computed).
 
@@ -1242,7 +1166,8 @@ class FileReport(ReportBase):
             return True
         return any(True for _ in self._flagged_steps())
 
-    @computed_field  # included in model_dump / JSON
+    @computed_field
+    @property
     def human_review_reason(self) -> Optional[str]:
         """Compact human-readable reason summarizing review needs (computed).
 
@@ -1281,6 +1206,66 @@ class FileReport(ReportBase):
 
         return " ".join(parts) if parts else None
 
+    @field_validator("path", mode="before")
+    @classmethod
+    def _coerce_path(cls, v):
+        if isinstance(v, (str, Path)):
+            p = Path(v)
+            if str(p) == "":
+                raise ValueError("path cannot be empty")
+            return p
+        raise TypeError("path must be str or Path")
+
+    def _flagged_steps(self) -> List[StepReport]:
+        """Return steps that have requested human review.
+
+        Returns
+        -------
+        list[StepReport]
+            Subset of :attr:`steps` whose ``review.flagged`` is ``True``.
+        """
+        out = []
+        for s in self.steps:
+            rf = getattr(s, "review", None)
+            if rf and getattr(rf, "flagged", False):
+                out.append(s)
+        return out
+
+    def _recompute_percent(self) -> None:
+        """Recompute :attr:`percent` as the arithmetic mean of step percents.
+
+        Notes
+        -----
+        Steps without explicit ``percent`` default to ``0``; consider
+        setting percents for long-running steps if you want smoother UI.
+        """
+        if self.steps:
+            self.percent = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
+
+    def _make_unique_step_id(self, label: str) -> str:
+        """Generate a slugified, unique step id based on a label.
+
+        If the slug already exists among current steps, appends ``-2``, ``-3``,
+        etc., until unique.
+
+        Parameters
+        ----------
+        label : str
+            Human-readable label to slugify.
+
+        Returns
+        -------
+        str
+            Unique step identifier.
+        """
+        base = _slugify(label) or "step"
+        existing = {s.id for s in self.steps}
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base}-{i}" in existing:
+            i += 1
+        return f"{base}-{i}"
 
 class StepReport(ReportBase):
     """Single unit of work within a file or batch.
