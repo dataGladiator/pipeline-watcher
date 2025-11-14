@@ -1028,6 +1028,13 @@ class FileReport(ReportBase):
             Self (chainable).
         """
         step.end()
+        if not step.id:
+            step.id = self._make_unique_step_id(step.label)
+        if any(s.id == step.id for s in self.steps):
+            j = 1
+            while any(s.id == f"{step.id}-{j}" for s in self.steps):
+                j += 1
+            step.id = f"{step.id}-{j}"
         self.steps.append(step)
         self._recompute_percent()
         # roll-up HITL review if you added ReviewFlag earlier
@@ -1243,10 +1250,10 @@ class StepReport(ReportBase):
 
     Attributes
     ----------
-    id : str
-        Machine-friendly identifier (e.g., ``"parse"``, ``"analyze"``).
     label : str or None
         Human-readable label for UI display.
+    id (optional) : str
+        Machine-friendly identifier (e.g., ``"parse"``, ``"analyze"``).
     checks : list[Check]
         Recorded boolean validations for this step.
     status : Status
@@ -1268,6 +1275,9 @@ class StepReport(ReportBase):
 
     Notes
     -----
+    `id` is optional because in some cases the burdern to construct a unique id
+        is placed on the container (e.g. FileReport). Therefore, the unique id
+        construction is by default deferred to the container.
     The auto-generated initializer accepts the same fields as attributes.
 
     Examples
@@ -1277,8 +1287,8 @@ class StepReport(ReportBase):
     ... st.end().status in {Status.SUCCEEDED, Status.FAILED}
     True
     """
-    id: str
-    label: Optional[str] = None
+    label: str
+    id: Optional[str] = None
     checks: List[Check] = Field(default_factory=list)
 
     @model_validator(mode="after")
