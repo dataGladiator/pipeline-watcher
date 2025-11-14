@@ -581,7 +581,8 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         Human-in-the-loop flag (``flagged`` + optional ``reason``).
     report_version : str
         Schema version written to JSON artifacts.
-
+    defer_start: bool
+        Initialization flag to skip .begin call upon construction.
     duration_ms (property) : Optional[float]
         Elapsed time in milliseconds.
     failed (property): bool
@@ -614,99 +615,6 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
     review: ReviewFlag = Field(default_factory=ReviewFlag)
     report_version: str = SCHEMA_VERSION
     defer_start: bool = Field(default=False, exclude=True, repr=False)
-
-    def model_post_init(self, __context) -> None:
-        # auto-start unless caller explicitly defers
-        if not self.defer_start and self.pending:
-            self.start()
-
-    def start(self) -> "ReportBase":
-        """Mark the unit as running and stamp ``started_at`` if missing.
-
-        Returns
-        -------
-        ReportBase
-            Self (for fluent chaining).
-
-        Examples
-        --------
-        >>> step = StepReport(...)
-        >>> step.start().note("begin").percent == 0
-        True
-        """
-        self.status = Status.RUNNING
-        if not self.started_at:
-            self.started_at = _now()
-        return self
-
-    def succeed(self) -> "ReportBase":
-        """Finalize successfully (``SUCCEEDED``) and set ``percent=100``.
-
-        Also stamps ``finished_at`` to the current time.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.status = Status.SUCCEEDED
-        self.percent = 100
-        self.finished_at = _now()
-        return self
-
-    def fail(self, message: Optional[str] = None) -> "ReportBase":
-        """Finalize as failed (``FAILED``).
-
-        Parameters
-        ----------
-        message : str, optional
-            Error text to append to :attr:`errors`.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.status = Status.FAILED
-        if message:
-            self.error(message)
-        self.finished_at = _now()
-        return self
-
-    def skip(self, reason: Optional[str] = None) -> "ReportBase":
-        """Finalize as skipped (``SKIPPED``).
-
-        Parameters
-        ----------
-        reason : str, optional
-            Rationale appended to :attr:`notes` as ``"Skipped: {reason}"``.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.status = Status.SKIPPED
-        if reason:
-            self.notes.append(f"Skipped: {reason}")
-        self.finished_at = _now()
-        return self
-
-    def note(self, msg: str) -> "ReportBase":
-        """Append a user-facing note.
-
-        Parameters
-        ----------
-        msg : str
-            Message to append to :attr:`notes`.
-
-        Returns
-        -------
-        ReportBase
-            Self.
-        """
-        self.notes.append(msg)
-        return self
 
     def error(self, msg: str) -> "ReportBase":
         """Append an error message (does not change status).
@@ -765,6 +673,99 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         return self.succeed() if self.ok else self.fail(
             "One or more checks failed" if self.errors or hasattr(self, "checks") else "Step failed"
         )
+
+    def fail(self, message: Optional[str] = None) -> "ReportBase":
+        """Finalize as failed (``FAILED``).
+
+        Parameters
+        ----------
+        message : str, optional
+            Error text to append to :attr:`errors`.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.status = Status.FAILED
+        if message:
+            self.error(message)
+        self.finished_at = _now()
+        return self
+
+    def model_post_init(self, __context) -> None:
+        # auto-start unless caller explicitly defers
+        if not self.defer_start and self.pending:
+            self.start()
+
+    def note(self, msg: str) -> "ReportBase":
+        """Append a user-facing note.
+
+        Parameters
+        ----------
+        msg : str
+            Message to append to :attr:`notes`.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.notes.append(msg)
+        return self
+
+    def skip(self, reason: Optional[str] = None) -> "ReportBase":
+        """Finalize as skipped (``SKIPPED``).
+
+        Parameters
+        ----------
+        reason : str, optional
+            Rationale appended to :attr:`notes` as ``"Skipped: {reason}"``.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.status = Status.SKIPPED
+        if reason:
+            self.notes.append(f"Skipped: {reason}")
+        self.finished_at = _now()
+        return self
+
+    def start(self) -> "ReportBase":
+        """Mark the unit as running and stamp ``started_at`` if missing.
+
+        Returns
+        -------
+        ReportBase
+            Self (for fluent chaining).
+
+        Examples
+        --------
+        >>> step = StepReport(...)
+        >>> step.start().note("begin").percent == 0
+        True
+        """
+        self.status = Status.RUNNING
+        if not self.started_at:
+            self.started_at = _now()
+        return self
+
+    def succeed(self) -> "ReportBase":
+        """Finalize successfully (``SUCCEEDED``) and set ``percent=100``.
+
+        Also stamps ``finished_at`` to the current time.
+
+        Returns
+        -------
+        ReportBase
+            Self.
+        """
+        self.status = Status.SUCCEEDED
+        self.percent = 100
+        self.finished_at = _now()
+        return self
 
     def warn(self, msg: str) -> "ReportBase":
         """Append a non-fatal warning.
