@@ -58,9 +58,9 @@ def test_file_report_report_base_warn():
     fr = FileReport(path=Path(""))
     assert report_base_warn(fr)
 
-############################
-#  TEST INHERITED METHODS  #
-############################
+##################################
+#  TEST FileReport ONLY METHODS  #
+##################################
 
 def test_file_report_add_completed_step():
     fr = FileReport(path=Path(""))
@@ -70,6 +70,8 @@ def test_file_report_add_completed_step():
     assert fr.steps[0].id == "id"
     assert fr.steps[0].succeeded
     assert fr.steps[0].terminal
+    assert are_unset(fr, ['errors', 'notes', 'warnings'])
+    assert review_flag_is_unset(fr)
 
 
 def test_file_report_add_failed_step():
@@ -83,8 +85,14 @@ def test_file_report_add_failed_step():
     assert fr.running # failure has not yet bubbled.
     assert not fr.ok #
     assert fr.running  # ok does not alter status
+    # error has not yet bubbled.
+    assert are_unset(fr, ['errors', 'metadata', 'notes', 'warnings'])
     fr.end()
     assert fr.failed # end bubbles failure
+    assert len(fr.errors) == 1  # error has bubbled.
+    assert are_unset(fr, ['metadata', 'notes', 'warnings'])
+    assert review_flag_is_unset(fr)
+
 
 def test_file_report_add_review_step():
     fr = FileReport(path=Path(""))
@@ -95,6 +103,8 @@ def test_file_report_add_review_step():
     assert fr.steps[0].succeeded
     # but the file process is still running
     assert fr.running
+    # no errors
+    assert are_unset(fr, ['errors', 'metadata', 'notes', 'warnings'])
 
 def test_file_report_add_skipped_step():
     fr = FileReport(path=Path(""))
@@ -103,6 +113,10 @@ def test_file_report_add_skipped_step():
     assert fr.steps[0].terminal
     assert fr.steps[0].skipped
     assert fr.running
+    # no errors
+    assert are_unset(fr, ['errors', 'metadata', 'notes', 'warnings'])
+    # no review flags.
+    assert review_flag_is_unset(fr)
 
 def test_file_report_append_step_basic():
     fr = FileReport(path=Path(""))
@@ -113,6 +127,10 @@ def test_file_report_append_step_basic():
     assert fr.steps[0].succeeded
     assert fr.steps[0] == step
     assert fr.running
+    # no errors
+    assert are_unset(fr, ['errors', 'metadata', 'notes', 'warnings'])
+    # no review flags.
+    assert review_flag_is_unset(fr)
 
 def test_file_report_append_step_construct_id():
     fr = FileReport(path=Path(""))
@@ -125,6 +143,9 @@ def test_file_report_append_step_construct_id():
     assert fr.steps[0] == step # note it is the same step
     assert fr.steps[0].id == "label" # but its id has been set.
     assert fr.running
+    assert are_unset(fr, ['errors', 'metadata', 'notes', 'warnings'])
+    assert review_flag_is_unset(fr)
+
 
 def test_file_report_begin():
     file_id = "id"
@@ -136,6 +157,8 @@ def test_file_report_begin():
     assert fr.metadata == metadata
     assert fr.file_id == file_id
     assert fr.started_at is not None
+    assert are_unset(fr, ['errors', 'notes', 'warnings'])
+    assert review_flag_is_unset(fr)
 
 def test_file_report_last_step():
     fr = FileReport(path=Path(""))
@@ -145,3 +168,21 @@ def test_file_report_last_step():
     step = StepReport(label="label", id="id")
     fr.append_step(step)
     assert fr.last_step() == step
+    # no errors
+    assert are_unset(fr, ['errors', 'metadata', 'notes', 'warnings'])
+    # no review flags.
+    assert review_flag_is_unset(fr)
+
+def test_filereport_append_auto_finalizes_and_rolls_percent():
+    fr = FileReport.begin(path="", n_steps=2)
+    # step 1 (explicit succeed)
+    st1 = StepReport.begin("parse").succeed()
+    fr.append_step(st1)
+    assert fr.steps[0].succeeded
+    assert fr.percent == 50
+
+    # step 2 (implicit end -> success since no checks/errors)
+    st2 = StepReport.begin("analyze")
+    fr.append_step(st2)
+    assert fr.steps[1].status.terminal
+    assert fr.percent == 100
