@@ -12,7 +12,7 @@
 
 - branch decisions and metadata
 
-- HITL (Human-In-The-Loop) review flags
+- Review flags (perfect for HITL systems)
 
 The result is a clean, UI-ready log format that your browser or dashboard can render directly. Included are helper Jinja2 templates for compiling the reports into HTML.
 
