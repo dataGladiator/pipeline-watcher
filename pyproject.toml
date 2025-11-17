@@ -16,6 +16,9 @@ classifiers = [
   "License :: OSI Approved :: MIT License"
 ]
 
+[project.scripts]
+pw-summary = "pipeline_watcher.cli_report_summary:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/pipeline_watcher"]
 
