@@ -21,7 +21,8 @@ from dataclasses import fields
 import mimetypes
 
 # third party import
-from pydantic import BaseModel, Field, computed_field, model_validator, field_validator, ConfigDict
+from pydantic import BaseModel, Field, computed_field, model_validator, field_validator
+from pydantic import ConfigDict, PrivateAttr
 
 # local imports
 from .clocks import now_utc as _now
@@ -912,6 +913,7 @@ class FileReport(ReportBase):
     file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
     n_steps: int = 1
+    _pipeline: Optional["PipelineReport"] = PrivateAttr(default=None)
 
     def add_completed_step(
         self,
@@ -1663,6 +1665,7 @@ def pipeline_file(
             file_id=file_id,
             metadata=dict(metadata) if metadata else {},
         )
+        fr.attach_pipeline(pr)
 
         # Optional banner update on enter
         if set_stage_on_enter:
@@ -1671,8 +1674,6 @@ def pipeline_file(
                 percent=pr.percent,
                 message=pr.message,
             )
-
-        t0 = time.perf_counter()
 
         # Optional capture (settings-driven)
         stdout_buf = StringIO() if settings.capture_streams else None
@@ -1747,57 +1748,215 @@ def pipeline_file(
                             fr.warnings.append(f"save failed: {save_err!r}")
 
 
-
-
 @contextmanager
 def file_step(
-    file_report: "FileReport",
+    file_report: FileReport,
     id: str,
     *,
     label: str | None = None,
-    **maybe_settings_overrides,
+    **other_options,
 ):
     """
-    Context manager for a step inside a file, governed by WatcherSettings.
+    Context manager for a step inside a FileReport, governed by WatcherSettings.
 
     Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True).
     They apply only within this context; otherwise current settings are used.
     """
-    # Filter only valid WatcherSettings keys
     settings_overrides = {
-        k: v for k, v in maybe_settings_overrides.items() if k in _SETTINGS_KEYS
+        k: v for k, v in other_options.items() if k in _SETTINGS_KEYS
     }
 
-    # Apply overrides (if any) for just this block; otherwise act as a reader
     with use_settings(**settings_overrides) as settings:
-        st = StepReport.begin(id, label=label)
+        st = StepReport.begin(id=id, label=label)
 
-        # Optional capture (settings-driven)
         stdout_buf = StringIO() if settings.capture_streams else None
         stderr_buf = StringIO() if settings.capture_streams else None
         warn_list: list[warnings.WarningMessage] | None = None
+        encountered_exception = False
 
         with ExitStack() as stack:
             if settings.capture_warnings:
-                warn_list = stack.enter_context(warnings.catch_warnings(record=True))
+                warn_list = stack.enter_context(
+                    warnings.catch_warnings(record=True)
+                )
                 warnings.simplefilter("default")
+
             if settings.capture_streams:
-                if stdout_buf: stack.enter_context(redirect_stdout(stdout_buf))
-                if stderr_buf: stack.enter_context(redirect_stderr(stderr_buf))
+                if stdout_buf is not None:
+                    stack.enter_context(redirect_stdout(stdout_buf))
+                if stderr_buf is not None:
+                    stack.enter_context(redirect_stderr(stderr_buf))
 
             try:
                 yield st
                 st.succeed()
+
             except BaseException as e:
-                st.errors.append(f"{type(e).__name__}: {e}")
+                encountered_exception = True
+                exc_type_name = type(e).__name__
+
+                st.errors.append(f"{exc_type_name}: {e}")
+
                 if settings.store_traceback:
-                    tb = "".join(traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit))
+                    tb = "".join(
+                        traceback.format_exception(
+                            type(e), e, e.__traceback__,
+                            limit=settings.traceback_limit,
+                        )
+                    )
                     if tb:
                         st.metadata["traceback"] = tb
-                st.fail("Unhandled exception in file step")
+
+                st.fail(f"Unhandled {exc_type_name} in file step")
 
                 if settings.should_raise(e):
                     raise
 
                 if msg := settings.suppression_breadcrumb(e):
                     st.warnings.append(msg)
+
+            finally:
+                if stdout_buf is not None:
+                    st.metadata["stdout"] = stdout_buf.getvalue()
+                if stderr_buf is not None:
+                    st.metadata["stderr"] = stderr_buf.getvalue()
+                if warn_list is not None:
+                    st.metadata["warnings"] = [
+                        f"{w.category.__name__}: {w.message}"
+                        for w in warn_list
+                    ]
+
+                # Finalize step via FileReport: append_step calls st.end(),
+                # enforces id uniqueness, updates timestamps, etc.
+                file_report.append_step(st)
+
+                # Auto-save via owning pipeline, if available
+                if encountered_exception and settings.save_on_exception:
+                    pipeline = getattr(file_report, "pipeline", None)
+                    if pipeline is not None:
+                        try:
+                            save_path = (
+                                settings.exception_save_path_override
+                                or pipeline.output_path
+                            )
+                            if save_path:
+                                pipeline.save(save_path)
+                            else:
+                                st.warnings.append(
+                                    "auto-save skipped: no pipeline output path configured"
+                                )
+                        except Exception as save_err:
+                            st.warnings.append(f"save failed: {save_err!r}")
+                    else:
+                        # Invariant *should* be: file_report is always tied to a pipeline.
+                        # But this keeps the behavior graceful if that’s ever relaxed.
+                        st.warnings.append(
+                            "auto-save skipped: file_report not attached to a pipeline"
+                        )
+
+
+@contextmanager
+def pipeline_step(
+    pr: Optional[PipelineReport],
+    label: str,
+    *,
+    id: str | None = None,
+    **other_options,
+):
+    """
+    Context manager for a step inside a PipelineReport, governed by WatcherSettings.
+
+    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True).
+    They apply only within this context; otherwise current settings are used.
+
+    The associated PipelineReport is either passed explicitly via `pr=`
+    or discovered from the current bind_pipeline() context.
+    """
+    # Filter only valid WatcherSettings keys
+    settings_overrides = {k: v for k, v in other_options.items() if k in _SETTINGS_KEYS}
+
+    # Bind to a pipeline if not explicitly provided
+    pr = pr or _current_pipeline_report.get(None)
+    if pr is None:
+        raise RuntimeError(
+            "pipeline_step requires a PipelineReport: pass `pr=` or call within `with bind_pipeline(pr):`"
+        )
+
+    # Apply overrides (if any) for just this block
+    with use_settings(**settings_overrides) as settings:
+        st = StepReport.begin(label, id=id)
+
+        # Optional capture (settings-driven)
+        stdout_buf = StringIO() if settings.capture_streams else None
+        stderr_buf = StringIO() if settings.capture_streams else None
+        warn_list: list[warnings.WarningMessage] | None = None
+        encountered_exception = False
+
+        with ExitStack() as stack:
+            if settings.capture_warnings:
+                warn_list = stack.enter_context(warnings.catch_warnings(record=True))
+                warnings.simplefilter("default")
+
+            if settings.capture_streams:
+                if stdout_buf is not None:
+                    stack.enter_context(redirect_stdout(stdout_buf))
+                if stderr_buf is not None:
+                    stack.enter_context(redirect_stderr(stderr_buf))
+
+            try:
+                # User code runs here
+                yield st
+                st.succeed()
+            except BaseException as e:
+                encountered_exception = True
+
+                exc_type_name = type(e).__name__
+
+                # Record error + optional detail
+                st.errors.append(f"{exc_type_name}: {e}")
+
+                if settings.store_traceback:
+                    tb = "".join(
+                        traceback.format_exception(
+                            type(e), e, e.__traceback__, limit=settings.traceback_limit
+                        )
+                    )
+                    if tb:
+                        st.metadata["traceback"] = tb
+
+                # Status line surfaces exception *name* even if traceback is suppressed
+                st.fail(f"Unhandled {exc_type_name} in pipeline step")
+
+                if settings.should_raise(e):
+                    raise
+
+                if msg := settings.suppression_breadcrumb(e):
+                    st.warnings.append(msg)
+
+            finally:
+                # Persist diagnostics
+                if stdout_buf is not None:
+                    st.metadata["stdout"] = stdout_buf.getvalue()
+                if stderr_buf is not None:
+                    st.metadata["stderr"] = stderr_buf.getvalue()
+                if warn_list is not None:
+                    st.metadata["warnings"] = [
+                        f"{w.category.__name__}: {w.message}"  # type: ignore[attr-defined]
+                        for w in warn_list
+                    ]
+
+                # Let the pipeline/file own finalization:
+                # append_step(st) will call st.end(), enforce id uniqueness,
+                # and update the FileReport's update time.
+                pr.append_step(st)
+
+                # Optional: mirror pipeline_file best-effort auto-save
+                if encountered_exception and settings.save_on_exception:
+                    try:
+                        save_path = settings.exception_save_path_override or pr.output_path
+                        if save_path:
+                            pr.save(save_path)
+                        else:
+                            st.warnings.append("auto-save skipped: no output path configured")
+                    except Exception as save_err:
+                        st.warnings.append(f"save failed: {save_err!r}")
