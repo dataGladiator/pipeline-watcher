@@ -156,6 +156,47 @@ class ReviewHelpers:
         return self
 
 
+def construct_unique_step_id_from_label(label: str, steps: list) -> str:
+    """Generate a slugified, unique step id based on a label.
+
+    If the slug already exists among current steps, appends ``-2``, ``-3``,
+    etc., until unique.
+
+    Parameters
+    ----------
+    label : str
+        Human-readable label to slugify.
+    steps: list
+        List of StepReport objects.
+
+    Returns
+    -------
+    str
+        Unique step identifier.
+    """
+    base = _slugify(label) or "step"
+    existing = {s.id for s in steps}
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}-{i}" in existing:
+        i += 1
+    return f"{base}-{i}"
+
+
+def make_step_id_unique(id: str, steps: list, max_steps: int = 10_000) -> str:
+    if not id:
+        id = f'step-{1+len(steps)}'
+    if any(s.id == id for s in steps):
+        j = 1
+        while any(s.id == f"{id}-{j}" for s in steps):
+            j += 1
+            if j > max_steps:
+                raise ValueError(f"Reached maximum number of steps: {max_steps}.")
+        id = f"{id}-{j}"
+    return id
+
+
 class PipelineReport(BaseModel):
     """Batch-level container with ordered batch steps and per-file reports.
 
@@ -193,7 +234,6 @@ class PipelineReport(BaseModel):
     - The model is append-only for auditability.
     - Use :meth:`set_progress` to update the banner; it stamps ``updated_at``.
     """
-
     label: str
     output_path: Optional[Path] = None
     kind: Literal["validation", "process", "test"] = "process"
@@ -240,64 +280,24 @@ class PipelineReport(BaseModel):
             target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(self.model_dump_json(indent=indent), encoding=encoding)
 
-    def set_progress(self, stage: str, percent: int, message: str = "") -> None:
-        """Update the progress banner and timestamp.
+    def add_completed_step(self, label: str, *, id: str | None = None) -> StepReport:
+        """Construct, finalize, append, and return a batch-level step. Ensures id uniqueness.
 
         Parameters
         ----------
-        stage : str
-            Short stage label (e.g., ``"discover"``).
-        percent : int
-            Clamped to ``0..100``.
-        message : str, default ""
-            UI-visible note.
-
-        Examples
-        --------
-        >>> report = PipelineReport(...)
-        >>> report.set_progress("discover", 5, "Scanning directory…")
-        """
-        self.stage = stage
-        self.percent = max(0, min(100, percent))
-        self.message = message
-        self.updated_at = _now()
-
-    def append_step(self, step: StepReport) -> "PipelineReport":
-        """Finalize and append a batch-level step; update ``updated_at``.
-
-        Parameters
-        ----------
-        step : StepReport
-            Step to finalize via :meth:`StepReport.end` and append.
-
-        Returns
-        -------
-        PipelineReport
-            Self (chainable).
-        """
-        step.end()
-        self.steps.append(step)
-        self.updated_at = _now()
-        return self
-
-    def add_step(self, id: str, *, label: str | None = None) -> StepReport:
-        """Construct, finalize, append, and return a batch-level step.
-
-        Parameters
-        ----------
-        id : str
-            Step identifier (e.g., ``"validate_manifest"``).
-        label : str, optional
+        label : str
             Human-friendly label.
-
+        id : str, optional
+            Step identifier.
         Returns
         -------
         StepReport
             The created (and ended) step.
         """
-        step = StepReport.begin(id, label=label).end()
-        self.steps.append(step)
-        self.updated_at = _now()
+        if not id:
+            id = construct_unique_step_id_from_label(label, self.steps)
+        step = StepReport.begin(label, id=id)
+        self.append_step(step)
         return step
 
     def append_file(self, fr: FileReport) -> "PipelineReport":
@@ -318,43 +318,26 @@ class PipelineReport(BaseModel):
         self.updated_at = _now()
         return self
 
-    def last_step(self) -> StepReport | None:
-        """Return the last batch-level step or ``None`` if empty.
-
-        Returns
-        -------
-        StepReport or None
-        """
-        return self.steps[-1] if self.steps else None
-
-    def iter_steps(self, *, status: Status | None = None) -> Iterable[StepReport]:
-        """Iterate over batch-level steps, optionally filtering by status.
+    def append_step(self, step: StepReport) -> "PipelineReport":
+        """Finalize and append a batch-level step; update ``updated_at``.
 
         Parameters
         ----------
-        status : StepStatus or None, default None
-            If provided, only yield steps whose status equals ``status``.
+        step : StepReport
+            Step to finalize via :meth:`StepReport.end` and append.
 
-        Yields
-        ------
-        StepReport
-            Matching steps in append order.
+        Returns
+        -------
+        PipelineReport
+            Self (chainable).
         """
-        for s in self.steps:
-            if status is None or s.status == status:
-                yield s
-
-    def recompute_overall_from_steps(self) -> None:
-        """Recalculate overall ``percent`` from batch-level steps.
-
-        Sets the banner percent to the arithmetic mean of child step
-        percents and preserves the current ``stage``/``message`` (or
-        uses defaults if unset). Does nothing if there are no steps.
-        """
-        if not self.steps:
-            return
-        pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
-        self.set_progress(self.stage or "steps", pct, self.message or "")
+        step.end()
+        if not step.id:
+            step.id = construct_unique_step_id_from_label(step.label, self.steps)
+        step.id = make_step_id_unique(step.id, self.steps)
+        self.steps.append(step)
+        self.updated_at = _now()
+        return self
 
     def files_for(self, key) -> list["FileReport"]:
         """Return all file reports matching an id/name/path/basename.
@@ -380,34 +363,6 @@ class PipelineReport(BaseModel):
             if k in _file_keys(fr):
                 out.append(fr)
         return out
-
-    def get_file(self, key) -> "FileReport | None":
-        """Return the first matching file report or ``None`` if absent.
-
-        Parameters
-        ----------
-        key : Any
-            See :meth:`files_for`.
-
-        Returns
-        -------
-        FileReport or None
-        """
-        matches = self.files_for(key)
-        return matches[0] if matches else None
-
-    def file_seen(self, key) -> bool:
-        """Whether a file with the given key appears in the report at all.
-
-        Parameters
-        ----------
-        key : Any
-
-        Returns
-        -------
-        bool
-        """
-        return self.get_file(key) is not None
 
     def file_processed(self, key, *, require_success: bool = False) -> bool:
         """Whether a file has reached a terminal/finished state.
@@ -444,28 +399,93 @@ class PipelineReport(BaseModel):
                 or (getattr(fr, "percent", None) == 100)
         )
 
-    def unseen_expected(self, expected_iterable) -> list[str]:
-        """Return expected filenames/ids/paths that are **not** present.
+    def file_seen(self, key) -> bool:
+        """Whether a file with the given key appears in the report at all.
 
         Parameters
         ----------
-        expected_iterable : Iterable[Any]
-            Filenames/ids/paths expected to appear in :attr:`files`.
+        key : Any
 
         Returns
         -------
-        list[str]
-            Items from ``expected_iterable`` that were not matched.
+        bool
         """
-        have = set()
-        for fr in self.files:
-            have |= _file_keys(fr)
-        missing = []
-        for x in expected_iterable:
-            k = _norm_key(x)
-            if k and k not in have:
-                missing.append(str(x))
-        return missing
+        return self.get_file(key) is not None
+
+    def get_file(self, key) -> "FileReport | None":
+        """Return the first matching file report or ``None`` if absent.
+
+        Parameters
+        ----------
+        key : Any
+            See :meth:`files_for`.
+
+        Returns
+        -------
+        FileReport or None
+        """
+        matches = self.files_for(key)
+        return matches[0] if matches else None
+
+    def iter_steps(self, *, status: Status | None = None) -> Iterable[StepReport]:
+        """Iterate over batch-level steps, optionally filtering by status.
+
+        Parameters
+        ----------
+        status : StepStatus or None, default None
+            If provided, only yield steps whose status equals ``status``.
+
+        Yields
+        ------
+        StepReport
+            Matching steps in append order.
+        """
+        for s in self.steps:
+            if status is None or s.status == status:
+                yield s
+
+    def last_step(self) -> StepReport | None:
+        """Return the last batch-level step or ``None`` if empty.
+
+        Returns
+        -------
+        StepReport or None
+        """
+        return self.steps[-1] if self.steps else None
+
+    def recompute_overall_from_steps(self) -> None:
+        """Recalculate overall ``percent`` from batch-level steps.
+
+        Sets the banner percent to the arithmetic mean of child step
+        percents and preserves the current ``stage``/``message`` (or
+        uses defaults if unset). Does nothing if there are no steps.
+        """
+        if not self.steps:
+            return
+        pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
+        self.set_progress(self.stage or "steps", pct, self.message or "")
+
+    def set_progress(self, stage: str, percent: int, message: str = "") -> None:
+        """Update the progress banner and timestamp.
+
+        Parameters
+        ----------
+        stage : str
+            Short stage label (e.g., ``"discover"``).
+        percent : int
+            Clamped to ``0..100``.
+        message : str, default ""
+            UI-visible note.
+
+        Examples
+        --------
+        >>> report = PipelineReport(...)
+        >>> report.set_progress("discover", 5, "Scanning directory…")
+        """
+        self.stage = stage
+        self.percent = max(0, min(100, percent))
+        self.message = message
+        self.updated_at = _now()
 
     def table_rows_for_files_map(self, expected: Mapping[str, Any]) -> list[dict]:
         """Produce Django/Jinja-friendly summary rows for a files mapping.
@@ -546,6 +566,29 @@ class PipelineReport(BaseModel):
 
         return rows
 
+    def unseen_expected(self, expected_iterable) -> list[str]:
+        """Return expected filenames/ids/paths that are **not** present.
+
+        Parameters
+        ----------
+        expected_iterable : Iterable[Any]
+            Filenames/ids/paths expected to appear in :attr:`files`.
+
+        Returns
+        -------
+        list[str]
+            Items from ``expected_iterable`` that were not matched.
+        """
+        have = set()
+        for fr in self.files:
+            have |= _file_keys(fr)
+        missing = []
+        for x in expected_iterable:
+            k = _norm_key(x)
+            if k and k not in have:
+                missing.append(str(x))
+        return missing
+
 
 class ReportBase(BaseModel, ABC, ReviewHelpers):
     """Abstract base for report units (steps/files/batches).
@@ -565,9 +608,9 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         Current lifecycle status (defaults to ``PENDING``).
     percent : int
         Progress percentage ``0..100`` (informational; not enforced).
-    started_at : datetime or None
+    started_at : datetime | None
         UTC timestamp when processing started.
-    finished_at : datetime or None
+    finished_at : datetime | None
         UTC timestamp when processing finalized.
     notes : list[str]
         Freeform narrative messages intended for UI display.
@@ -583,18 +626,19 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         Schema version written to JSON artifacts.
     defer_start: bool
         Initialization flag to skip .begin call upon construction.
-    duration_ms (property) : Optional[float]
-        Elapsed time in milliseconds.
-    failed (property): bool
-        Return `True` if the unit has failed.
-    pending (property): bool
-        Return `True` if the unit is pending.
-    running (property): bool
-        Return `True` if the unit is running.
-    skipped (property): bool
-        Return `True` if the unit was skipped.
-    succeeded (property): bool
-        Return `True` if the unit has succeeded.
+    duration_ms : float|None
+        Elapsed time in milliseconds (property).
+    failed : bool
+        Return `True` if the unit has failed (property).
+    pending : bool
+        Return `True` if the unit is pending (property).
+    running : bool
+        Return `True` if the unit is running (property).
+    skipped : bool
+        Return `True` if the unit was skipped (property).
+    succeeded : bool
+        Return `True` if the unit has succeeded (property).
+
 
     See Also
     --------
@@ -642,7 +686,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         return self
 
     def end(self) -> "ReportBase":
-        """Finalize the file if not already terminal.
+        """Finalize the unit if not already terminal.
 
         If already terminal (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
         :attr:`finished_at` if missing and returns. Otherwise, infers success
@@ -788,7 +832,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
 
     @computed_field
     @property
-    def duration_ms(self) -> Optional[float]:
+    def duration_ms(self) -> float | None:
         """
         Elapsed time in milliseconds.
 
@@ -849,6 +893,8 @@ class FileReport(ReportBase):
         Stable identifier for the file (preferably unique within a batch).
     steps : list[StepReport]
         Ordered step sequence (normally appended via helpers).
+    n_steps : int
+        The number of steps in the process (used for computing percent).
     requires_human_review (property): bool
         Whether this file needs human review (computed)
     human_review_reason (property): str
@@ -865,6 +911,7 @@ class FileReport(ReportBase):
     path: Path
     file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
+    n_steps: int = 1
 
     def add_completed_step(
         self,
@@ -893,7 +940,7 @@ class FileReport(ReportBase):
             Self.
         """
         sid = id or self._make_unique_step_id(label)
-        step = StepReport.begin(sid, label=label)
+        step = StepReport.begin(label, id=sid)
         if metadata:
             step.metadata.update(metadata)
         if note:
@@ -1009,18 +1056,22 @@ class FileReport(ReportBase):
         # If your append_step rolls review up to the FileReport, that'll happen there.
         return self.append_step(step)
 
-    def append_step(self, step: StepReport) -> "FileReport":
+    def append_step(self,
+                    step: StepReport,
+                    max_steps: int = 10_000) -> "FileReport":
         """Finalize and append a step; recompute aggregate percent.
 
-        The step is finalized via :meth:`StepReport.end`, appended to
-        :attr:`steps`, and the file percent is updated as the arithmetic
+        The step is finalized via [StepReport.end](.#pipeline_watcher.StepReport.end), appended to
+        [steps](.#pipeline_watcher.FileReport.steps), and the file percent is updated as the arithmetic
         mean of child step percents. If the step requests HITL review and
-        the file is not already flagged, the file's :attr:`review` is set.
+        the file is not already flagged, the file's [review](.#pipeline_watcher.FileReport.review) is set.
 
         Parameters
         ----------
         step : StepReport
             Step to finalize and append.
+        max_steps : int, optional
+            The maximum number of steps allowed.
 
         Returns
         -------
@@ -1029,12 +1080,8 @@ class FileReport(ReportBase):
         """
         step.end()
         if not step.id:
-            step.id = self._make_unique_step_id(step.label)
-        if any(s.id == step.id for s in self.steps):
-            j = 1
-            while any(s.id == f"{step.id}-{j}" for s in self.steps):
-                j += 1
-            step.id = f"{step.id}-{j}"
+            step.id = construct_unique_step_id_from_label(step.label, self.steps)
+        step.id = make_step_id_unique(step.id, self.steps)
         self.steps.append(step)
         self._recompute_percent()
         # roll-up HITL review if you added ReviewFlag earlier
@@ -1047,6 +1094,7 @@ class FileReport(ReportBase):
     def begin(cls,
               path: Path | str,
               file_id: str | None = None,
+              n_steps: int = 1,
               metadata: dict | None = None
     ) -> "FileReport":
         """Construct and mark the file report as running.
@@ -1057,6 +1105,8 @@ class FileReport(ReportBase):
             The path to file.
         file_id (optional) : str
             Stable file identifier.
+        n_steps : int, optional
+            Number of steps in process.
         metadata (optional): dict
             Dictionary of metadata about the file.
 
@@ -1067,6 +1117,7 @@ class FileReport(ReportBase):
         """
         return cls(path=Path(path),
                    file_id=file_id,
+                   n_steps=n_steps,
                    metadata=dict(metadata) if metadata else {}).start()
 
 
@@ -1097,8 +1148,13 @@ class FileReport(ReportBase):
         # Explicit success wins
         if self.succeeded:
             return True
-        # Otherwise roll up from steps (if any)
-        return all(s.ok for s in self.steps) if self.steps else True
+        # Otherwise roll up from steps and surface errors
+        all_steps_ok = all(s.ok for s in self.steps) if self.steps else True
+        if not all_steps_ok:
+            errors = ["; ".join(step.errors) for step in self.steps if not step.ok]
+            for error in errors:
+                self.errors.append(error)
+        return all_steps_ok
 
     @computed_field
     @property
@@ -1206,15 +1262,12 @@ class FileReport(ReportBase):
         return out
 
     def _recompute_percent(self) -> None:
-        """Recompute :attr:`percent` as the arithmetic mean of step percents.
-
-        Notes
-        -----
-        Steps without explicit ``percent`` default to ``0``; consider
-        setting percents for long-running steps if you want smoother UI.
+        """Recompute :attr:`percent` as the fraction of completed steps.
         """
-        if self.steps:
-            self.percent = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
+        if self.n_steps and self.steps:
+            self.percent = int(100 * sum(1 for s in self.steps if s.terminal) / self.n_steps + 0.5)
+        else:
+            self.percent = 0
 
     def _make_unique_step_id(self, label: str) -> str:
         """Generate a slugified, unique step id based on a label.
@@ -1282,46 +1335,51 @@ class StepReport(ReportBase):
 
     Examples
     --------
-    >>> st = StepReport.begin("extract_text", label="Extract text (OCR)")
+    >>> st = StepReport.begin("Extract text (OCR)")
     ... st.add_check("ocr_quality>=0.9", ok=True)
-    ... st.end().status in {Status.SUCCEEDED, Status.FAILED}
+    ... st.end() # note end is typically called via e.g. FileReport.append_step where other finalization occurs.
+    ... st.succeeded
     True
+    >>> st.terminal
+    True
+    >>> st.duration_ms
+    314
     """
     label: str
     id: Optional[str] = None
     checks: List[Check] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _default_label(self):
+    def _default_id(self):
         # Treat None/"" as unset; drop the `or self.label == ""` part if "" is meaningful
-        if self.label is None or self.label == "":
+        if self.id is None or self.id == "":
             # When frozen, use object.__setattr__ during construction-time adjustments
-            object.__setattr__(self, "label", self.id)
+            object.__setattr__(self, "id", _slugify(self.label))
         return self
 
     @classmethod
-    def begin(cls, id: str, *, label: str | None = None) -> "StepReport":
+    def begin(cls, label: str, *, id: str | None = None) -> "StepReport":
         """Construct and mark the step as started.
 
         Parameters
         ----------
-        id : str
-            Step identifier.
-        label : str, optional
+        label : str
             Human-friendly label.
+        id : str | None, optional
+            Step identifier.
 
         Returns
         -------
         StepReport
             Started step report (``status=RUNNING``).
         """
-        if label is None or label == "":
-            label = id
-        return cls(id=id, label=label).start()
+        if id is None or id == "":
+            id = _slugify(label)
+        return cls(label=label, id=id).start()
 
     @property
     def ok(self) -> bool:
-        """Truthiness of success used by :meth:`ReportBase.end`.
+        """Reviews checks and surfaces errors.
 
         Returns
         -------
@@ -1334,7 +1392,12 @@ class StepReport(ReportBase):
             return False
         if self.status.succeeded:
             return True
-        return all(c.ok for c in self.checks) if self.checks else True
+        all_checks_passed = all(c.ok for c in self.checks) if self.checks else True
+        if not all_checks_passed:
+            for check in self.checks:
+                if not check.ok:
+                    self.errors.append(check.detail)
+        return all_checks_passed
 
     def add_check(self, name: str, ok: bool, detail: Optional[str] = None) -> None:
         """Record a boolean validation result.
