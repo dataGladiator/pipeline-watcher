@@ -1665,7 +1665,7 @@ def pipeline_file(
             file_id=file_id,
             metadata=dict(metadata) if metadata else {},
         )
-        fr.attach_pipeline(pr)
+        fr._pipeline = pr
 
         # Optional banner update on enter
         if set_stage_on_enter:
