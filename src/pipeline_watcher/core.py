@@ -33,7 +33,6 @@ from .settings import WatcherSettings, use_settings
 #: Schema version written to JSON artifacts.
 SCHEMA_VERSION = "v2"
 
-
 class LowerStrEnum(str, Enum):
     def _generate_next_value_(name, start, count, last_values):
         return name.lower()
@@ -246,41 +245,6 @@ class PipelineReport(BaseModel):
     steps: List[StepReport] = Field(default_factory=list)
     files: List[FileReport] = Field(default_factory=list)
 
-    def save(
-        self,
-        path: str | Path | None = None,
-        *,
-        indent: int = 2,
-        ensure_dir: bool = True,
-        encoding: str = "utf-8",
-    ) -> None:
-        """Persist the report to JSON on disk.
-
-        Writes directly to the target (no temp/atomic swap in this helper).
-
-        Parameters
-        ----------
-        path : str or Path or None, default None
-            Destination path. If ``None``, uses :attr:`output_path` or
-            ``reports/progress.json``.
-        indent : int, default 2
-            JSON indentation (passed to :meth:`BaseModel.model_dump_json`).
-        ensure_dir : bool, default True
-            If ``True``, creates parent directories as needed.
-        encoding : str, default "utf-8"
-            Text encoding for the output file.
-
-        Examples
-        --------
-        >>> report = PipelineReport(...)
-        >>> report.output_path = Path("reports/run-42.json")
-        >>> report.save()
-        """
-        target = Path(path or self.output_path or "reports/progress.json")
-        if ensure_dir:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(self.model_dump_json(indent=indent), encoding=encoding)
-
     def add_completed_step(self, label: str, *, id: str | None = None) -> StepReport:
         """Construct, finalize, append, and return a batch-level step. Ensures id uniqueness.
 
@@ -465,6 +429,24 @@ class PipelineReport(BaseModel):
             return
         pct = int(round(sum(s.percent for s in self.steps) / len(self.steps)))
         self.set_progress(self.stage or "steps", pct, self.message or "")
+
+    def save(
+            self,
+            path: Path | str | None = None,
+            *,
+            ensure_dir: bool = True,
+            indent: int = 2,
+            encoding: str = "utf-8",
+    ) -> None:
+        target = Path(path or self.output_path or "reports/progress.json")
+        if ensure_dir:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            self.model_dump_json(
+                indent=indent,
+            ),
+            encoding=encoding,
+        )
 
     def set_progress(self, stage: str, percent: int, message: str = "") -> None:
         """Update the progress banner and timestamp.
@@ -908,7 +890,7 @@ class FileReport(ReportBase):
     See ReportBase for additional attributes, properties and methods
     The auto-generated initializer accepts the same fields as attributes.
     """
-    model_config = ConfigDict(extra='forbid')
+    # model_config = ConfigDict(extra='forbid')
     path: Path
     file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
@@ -1751,9 +1733,9 @@ def pipeline_file(
 @contextmanager
 def file_step(
     file_report: FileReport,
-    id: str,
+    label: str,
     *,
-    label: str | None = None,
+    id: str | None = None,
     **other_options,
 ):
     """
@@ -1767,7 +1749,7 @@ def file_step(
     }
 
     with use_settings(**settings_overrides) as settings:
-        st = StepReport.begin(id=id, label=label)
+        st = StepReport.begin(label, id=id)
 
         stdout_buf = StringIO() if settings.capture_streams else None
         stderr_buf = StringIO() if settings.capture_streams else None
