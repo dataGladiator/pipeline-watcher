@@ -2,19 +2,25 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
-from typing import Any, Iterable, List, Tuple
+from typing import Any, Dict, List
 
-from pipeline_watcher import PipelineReport  # adjust import if needed
+from pipeline_watcher import PipelineReport  # adjust import as needed
 
 
 # ------------------------
 # Loading
 # ------------------------
 
-def load_pipeline_report(path: Path) -> PipelineReport:
-    text = path.read_text(encoding="utf-8")
-    return PipelineReport.model_validate_json(text)
+def load_pipeline_report(path: Path | str) -> PipelineReport:
+    """
+    Temporary, strict-ish loader.
+    You said you've changed it to this; keeping it verbatim for now.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    data = json.loads(text)
+    return PipelineReport.model_validate(data)
 
 
 # ------------------------
@@ -33,27 +39,26 @@ def count_files_and_steps(report: PipelineReport) -> tuple[int, int]:
 # Row building helpers
 # ------------------------
 
-# Columns: Type, Parent, Name/ID, Label, Status, Succeeded, ms, Review
-Row = Tuple[str, str, str, str, str, str, str, str]
+# Each row is a dict; possible keys:
+#   type, parent, id, name, label, status, succeeded, ms, review
 
-
-def _format_status(obj: Any) -> str:
+def _status_str(obj: Any) -> str:
     status = getattr(obj, "status", None)
     if hasattr(status, "name"):
         return status.name
     return str(status) if status is not None else ""
 
 
-def _format_duration(obj: Any) -> str:
+def _duration_ms_str(obj: Any) -> str:
     dur = getattr(obj, "duration_ms", None)
     return f"{dur:.0f}" if dur is not None else ""
 
 
-def _format_file_name(f: Any) -> str:
+def _file_name(f: Any) -> str:
     path = getattr(f, "path", None)
     if path:
         try:
-            return str(Path(path).name)
+            return Path(path).name
         except TypeError:
             return str(path)
     file_id = getattr(f, "file_id", None)
@@ -65,10 +70,7 @@ def _format_file_name(f: Any) -> str:
     return "<file>"
 
 
-def _format_file_review(f: Any) -> str:
-    # FileReport has computed properties:
-    #   requires_human_review (bool)
-    #   human_review_reason (str)
+def _file_review_str(f: Any) -> str:
     rhr = getattr(f, "requires_human_review", False)
     if not rhr:
         return ""
@@ -76,7 +78,7 @@ def _format_file_review(f: Any) -> str:
     return f"YES: {reason}" if reason else "YES"
 
 
-def _format_step_review(st: Any) -> str:
+def _step_review_str(st: Any) -> str:
     review = getattr(st, "review", None)
     if review is None:
         return ""
@@ -87,50 +89,67 @@ def _format_step_review(st: Any) -> str:
     return f"YES: {reason}" if reason else "YES"
 
 
-def build_rows(report: PipelineReport) -> List[Row]:
-    rows: List[Row] = []
+def build_rows(report: PipelineReport) -> List[Dict[str, str]]:
+    """
+    Build a list of dict rows.
 
-    # ---------- pipeline-level steps ----------
+    Keys:
+      - type:        pipeline-step | file | file-step
+      - parent:      pipeline | <file name> | "-"
+      - id:          step id (if any)
+      - name:        file name or pipeline kind
+      - label:       step label
+      - status:      Status enum name/string
+      - succeeded:   "True"/"False"
+      - ms:          duration in milliseconds (string)
+      - review:      HITL review info, if any
+    """
+    rows: List[Dict[str, str]] = []
+
+    # ---- pipeline-level steps ----
     for st in report.steps or []:
-        rows.append((
-            "pipeline-step",
-            "pipeline",
-            st.id or "",
-            st.label or "",
-            _format_status(st),
-            str(st.succeeded),
-            _format_duration(st),
-            _format_step_review(st),
-        ))
+        rows.append({
+            "type": "pipeline-step",
+            "parent": "pipeline",
+            "id": st.id or "",
+            "name": report.label or report.kind or "pipeline",
+            "label": st.label or "",
+            "status": _status_str(st),
+            "succeeded": str(st.succeeded),
+            "ms": _duration_ms_str(st),
+            "review": _step_review_str(st),
+        })
 
-    # ---------- files + file steps ----------
+    # ---- files + file steps ----
     for f in report.files or []:
-        file_name = _format_file_name(f)
+        fname = _file_name(f)
 
-        # File row itself
-        rows.append((
-            "file",
-            "-",
-            file_name,
-            "",
-            _format_status(f),
-            str(f.succeeded),
-            _format_duration(f),
-            _format_file_review(f),
-        ))
+        # File row
+        rows.append({
+            "type": "file",
+            "parent": "-",
+            "id": getattr(f, "file_id", "") or "",
+            "name": fname,
+            "label": "",
+            "status": _status_str(f),
+            "succeeded": str(f.succeeded),
+            "ms": _duration_ms_str(f),
+            "review": _file_review_str(f),
+        })
 
-        # File-level steps
+        # Steps within file
         for st in f.steps or []:
-            rows.append((
-                "file-step",
-                file_name,
-                st.id or "",
-                st.label or "",
-                _format_status(st),
-                str(st.succeeded),
-                _format_duration(st),
-                _format_step_review(st),
-            ))
+            rows.append({
+                "type": "file-step",
+                "parent": fname,
+                "id": st.id or "",
+                "name": fname,
+                "label": st.label or "",
+                "status": _status_str(st),
+                "succeeded": str(st.succeeded),
+                "ms": _duration_ms_str(st),
+                "review": _step_review_str(st),
+            })
 
     return rows
 
@@ -139,7 +158,7 @@ def build_rows(report: PipelineReport) -> List[Row]:
 # Tracebacks
 # ------------------------
 
-def collect_tracebacks(report: PipelineReport) -> List[Tuple[str, str, str]]:
+def collect_tracebacks(report: PipelineReport) -> List[tuple[str, str, str]]:
     """
     Collect (scope, ident, traceback_text) from:
       - files
@@ -152,25 +171,25 @@ def collect_tracebacks(report: PipelineReport) -> List[Tuple[str, str, str]]:
         if not isinstance(meta, dict):
             return None
         tb = meta.get("traceback")
-        if tb:
-            return str(tb)
-        return None
+        if not tb:
+            return None
+        return str(tb)
 
-    tbs: List[Tuple[str, str, str]] = []
+    tbs: List[tuple[str, str, str]] = []
 
-    # Files and file steps
+    # Files + file steps
     for f in report.files or []:
-        file_name = _format_file_name(f)
+        fname = _file_name(f)
 
         tb = tb_for(f)
         if tb:
-            tbs.append(("file", file_name, tb))
+            tbs.append(("file", fname, tb))
 
         for st in f.steps or []:
             ident = st.id or st.label or "<unnamed>"
             tb = tb_for(st)
             if tb:
-                tbs.append(("file-step", f"{file_name}:{ident}", tb))
+                tbs.append(("file-step", f"{fname}:{ident}", tb))
 
     # Pipeline-level steps
     for st in report.steps or []:
@@ -197,47 +216,83 @@ def print_summary(report: PipelineReport) -> None:
     print()
 
 
-def print_table(rows: List[Row]) -> None:
+# Map column keys → human-friendly header labels
+COLUMN_HEADERS = {
+    "type": "Type",
+    "parent": "Parent",
+    "id": "ID",
+    "name": "Name",
+    "label": "Label",
+    "status": "Status",
+    "succeeded": "Succeeded",
+    "ms": "ms",
+    "review": "Review",
+}
+
+
+def print_table(rows: List[Dict[str, str]], cols_to_show: List[str]) -> None:
     if not rows:
         print("No steps or files recorded.")
         print()
         return
 
-    headers = ("Type", "Parent", "ID/Name", "Label", "Status", "Succeeded", "ms", "Review")
-    all_rows = [headers] + rows
+    # Only use supported keys
+    cols = [c for c in cols_to_show if c in COLUMN_HEADERS]
+    if not cols:
+        print("No columns selected to display (cols_to_show was empty).")
+        print()
+        return
 
-    col_widths = [
-        max(len(str(row[i])) for row in all_rows)
-        for i in range(len(headers))
+    # Build a "view" of each row with only selected keys
+    projected_rows = [
+        {k: (row.get(k, "") or "") for k in cols}
+        for row in rows
     ]
 
-    def fmt(row: Iterable[str]) -> str:
+    # Prepare headers and width calculation
+    headers = [COLUMN_HEADERS[k] for k in cols]
+    all_rows_for_width = [headers] + [
+        [r[k] for k in cols] for r in projected_rows
+    ]
+
+    col_widths = [
+        max(len(str(row[i])) for row in all_rows_for_width)
+        for i in range(len(cols))
+    ]
+
+    def fmt_vals(values: List[str]) -> str:
         return "  ".join(
-            str(col).ljust(col_widths[i])
-            for i, col in enumerate(row)
+            str(values[i]).ljust(col_widths[i])
+            for i in range(len(cols))
         )
 
-    print(fmt(headers))
+    # Print header
+    print(fmt_vals(headers))
     print("  ".join("-" * w for w in col_widths))
 
-    for r in rows:
-        print(fmt(r))
+    # Print rows
+    for r in projected_rows:
+        values = [r[k] for k in cols]
+        print(fmt_vals(values))
 
     print()
 
 
-def print_tracebacks(tracebacks: List[Tuple[str, str, str]]) -> None:
+def print_tracebacks(tracebacks: List[tuple[str, str, str]]) -> None:
     if not tracebacks:
         return
 
     print("Tracebacks:")
     print()
-
+    has_tracebacks = False
     for scope, ident, tb in tracebacks:
+        has_tracebacks = True
         print(f"[{scope} {ident}]")
         print(tb.rstrip())
         print()
 
+    if has_tracebacks:
+        print('These tracebacks are from the pipeline report.')
 
 # ------------------------
 # CLI entrypoint
@@ -252,17 +307,53 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         help="Path to PipelineReport JSON produced by pipeline-watcher.",
     )
+
+    # Column toggles (False by default as requested)
+    parser.add_argument("--show-type", action="store_true", help="Show the row type.")
+    parser.add_argument("--show-parent", action="store_true", help="Show the parent (e.g. file for file-steps).")
+    parser.add_argument("--show-id", action="store_true", help="Show the step/file ID.")
+    parser.add_argument("--show-name", action="store_true", help="Show the name (e.g. file name or pipeline label).")
+    parser.add_argument("--show-label", action="store_true", help="Show the step label.")
+    parser.add_argument("--show-status", action="store_true", help="Show status (PENDING/RUNNING/SUCCEEDED/etc).")
+    parser.add_argument("--show-succeeded", action="store_true", help="Show succeeded boolean.")
+    parser.add_argument("--show-ms", action="store_true", help="Show duration in milliseconds.")
+    parser.add_argument("--show-review", action="store_true", help="Show review/HITL info.")
+
     args = parser.parse_args(argv)
 
     report = load_pipeline_report(args.path)
-
     print_summary(report)
 
+    # Decide which columns to show
+    # If the user specified any --show-* flags, use only those.
+    # Otherwise, fall back to a sensible default set.
+    flag_to_col = {
+        "show_type": "type",
+        "show_parent": "parent",
+        "show_id": "id",
+        "show_name": "name",
+        "show_label": "label",
+        "show_status": "status",
+        "show_succeeded": "succeeded",
+        "show_ms": "ms",
+        "show_review": "review",
+    }
+
+    selected_cols = [
+        col for attr, col in flag_to_col.items()
+        if getattr(args, attr)
+    ]
+
+    if not selected_cols:
+        # Default columns when no --show-* flags are used
+        selected_cols = ["type", "name", "label", "status", "succeeded"]
+
     rows = build_rows(report)
-    print_table(rows)
+    print_table(rows, selected_cols)
 
     tbs = collect_tracebacks(report)
     print_tracebacks(tbs)
+    print("\n\npipeline-watcher summary tool completed successfully.")
 
 
 if __name__ == "__main__":
