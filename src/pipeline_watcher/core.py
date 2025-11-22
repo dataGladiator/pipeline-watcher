@@ -1104,6 +1104,10 @@ class FileReport(ReportBase):
                    n_steps=n_steps,
                    metadata=dict(metadata) if metadata else {}).start()
 
+    @computed_field
+    @property
+    def label(self) -> str:
+        return str(self.path.name)
 
     def last_step(self) -> StepReport | None:
         """Return the most recently appended step or ``None`` if empty.
@@ -1675,7 +1679,7 @@ def pipeline_file(
             encountered_exception = False
             try:
                 yield fr
-                fr.succeed()
+                fr.end() # not strictly necessary, but end is idempotent, and user may forget.
             except BaseException as e:
                 # --- Always record first ---
                 encountered_exception = True
@@ -1771,7 +1775,7 @@ def file_step(
 
             try:
                 yield st
-                st.succeed()
+                st.end() # fallback in case user forgets.
 
             except BaseException as e:
                 encountered_exception = True
@@ -1888,7 +1892,7 @@ def pipeline_step(
             try:
                 # User code runs here
                 yield st
-                st.succeed()
+                st.end() # fallback in case user forgets.
             except BaseException as e:
                 encountered_exception = True
 
