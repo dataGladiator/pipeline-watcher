@@ -130,7 +130,7 @@ def build_rows(report: PipelineReport) -> List[Dict[str, str]]:
             "parent": "-",
             "id": getattr(f, "file_id", "") or "",
             "name": fname,
-            "label": "",
+            "label": f.label,
             "status": _status_str(f),
             "succeeded": str(f.succeeded),
             "ms": _duration_ms_str(f),
