@@ -202,8 +202,9 @@ class PipelineReport(BaseModel):
 
     Designed to be JSON-serializable (Pydantic v2) and UI-friendly. Maintains
     a progress banner (``stage``, ``percent``, ``message``, ``updated_at``),
-    an ordered list of batch-level [StepReport](file_step.md#StepReport) items, and a list of
-    [FileReport](file_step.md#FileReport) records.
+    an ordered list of batch-level
+    [`StepReport`][pipeline_watcher.core.StepReport] items, and a list of
+    [`FileReport`][pipeline_watcher.core.FileReport] records.
 
     Attributes
     ----------
@@ -227,12 +228,19 @@ class PipelineReport(BaseModel):
     files : list[FileReport]
         Per-file timelines collected in this batch.
     output_path : Path or None
-        Default output path for :meth:`save`.
+        Default output path for
+        [`save`][pipeline_watcher.core.PipelineReport.save].
+    status : Status
+        Aggregated lifecycle status over all batch steps and file reports
+        (computed). See [`Status`][pipeline_watcher.core.Status] and
+        [`PipelineReport.status`][pipeline_watcher.core.PipelineReport.status]
+        for roll-up rules.
 
     Notes
     -----
     - The model is append-only for auditability.
-    - Use :meth:`set_progress` to update the banner; it stamps ``updated_at``.
+    - Use [`set_progress`][pipeline_watcher.core.PipelineReport.set_progress]
+      to update the banner; it stamps ``updated_at``.
     """
     label: str
     output_path: Optional[Path] = None
@@ -244,6 +252,46 @@ class PipelineReport(BaseModel):
     report_version: str = SCHEMA_VERSION
     steps: List[StepReport] = Field(default_factory=list)
     files: List[FileReport] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def status(self) -> Status:
+        """Aggregated lifecycle status over all batch steps and file reports.
+
+        Rules (in priority order)
+        -------------------------
+        - ``FAILED``   → if any step or file has failed.
+        - ``RUNNING``  → if none failed but at least one is running.
+        - ``SKIPPED``  → if there is at least one unit and all are skipped.
+        - ``SUCCEEDED``→ if all units are terminal, none failed, and at least
+                         one succeeded.
+        - ``PENDING``  → otherwise (e.g., no units, or only pending units).
+        """
+        units: list[ReportBase] = []
+        units.extend(self.steps)
+        units.extend(self.files)
+
+        if not units:
+            return Status.PENDING
+
+        # Priority 1: any failure means FAILED
+        if any(u.status.failed for u in units):
+            return Status.FAILED
+
+        # Priority 2: any running means RUNNING
+        if any(u.status.running for u in units):
+            return Status.RUNNING
+
+        # Priority 3: all skipped means SKIPPED
+        if all(u.status.skipped for u in units):
+            return Status.SKIPPED
+
+        # Priority 4: terminal and at least one succeeded means SUCCEEDED
+        if all(u.status.terminal for u in units) and any(u.status.succeeded for u in units):
+            return Status.SUCCEEDED
+
+        # Fallback: incomplete
+        return Status.PENDING
 
     def add_completed_step(self, label: str, *, id: str | None = None) -> StepReport:
         """Construct, finalize, append, and return a batch-level step. Ensures id uniqueness.
@@ -863,32 +911,60 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
 class FileReport(ReportBase):
     """Per-file processing timeline composed of ordered steps.
 
-    Aggregates :class:`StepReport` items and provides convenience methods
-    for appending terminal steps (success/failed/skipped) and requesting
-    human-in-the-loop (HITL) review. Designed to be JSON-serialized and
-    consumed by UIs.
+    Aggregates [`StepReport`][pipeline_watcher.core.StepReport] items and provides
+    helpers for appending terminal steps (success/failed/skipped) and requesting
+    human-in-the-loop (HITL) review.
 
     Attributes
     ----------
-    path (required) : Path or None
+    # FileReport-specific
+    path : Path
         Source path or URI for display/debugging.
-    file_id : str
+    file_id : str or None
         Stable identifier for the file (preferably unique within a batch).
     steps : list[StepReport]
-        Ordered step sequence (normally appended via helpers).
+        Ordered step sequence for this file.
     n_steps : int
-        The number of steps in the process (used for computing percent).
-    requires_human_review (property): bool
-        Whether this file needs human review (computed)
-    human_review_reason (property): str
-        Compact human-readable reason summarizing review needs (computed).
-    size_bytes (property): Optional[int]
-        Best-effort determination of file's size in bytes.
+        Number of steps in the process (used to compute ``percent``).
+    label : str
+        Convenience label derived from :attr:`path` (basename).
+    name : str
+        Convenience name derived from :attr:`path` (basename).
+    mime_type : str or None
+        Guessed MIME type based on the path extension.
+    size_bytes : int or None
+        Best-effort file size in bytes.
+    requires_human_review : bool
+        Whether this file requires human review (computed).
+    human_review_reason : str or None
+        Human-readable summary of why review is required (computed).
+
+    # Inherited lifecycle fields (see ReportBase)
+    status : Status
+        Lifecycle status (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    percent : int
+        Progress percentage (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    started_at : datetime | None
+        When processing started (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    finished_at : datetime | None
+        When processing finished (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    notes : list[str]
+        Narrative messages (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    errors : list[str]
+        Fatal issues (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    warnings : list[str]
+        Non-fatal issues (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    metadata : dict[str, Any]
+        Arbitrary structured context (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    review : ReviewFlag
+        File-level HITL flag (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    report_version : str
+        Schema version (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
 
     Notes
     -----
-    See ReportBase for additional attributes, properties and methods
-    The auto-generated initializer accepts the same fields as attributes.
+    See [`ReportBase`][pipeline_watcher.core.ReportBase] for full semantics of
+    lifecycle fields and methods (``start``, ``end``, ``fail``, etc.).
     """
     # model_config = ConfigDict(extra='forbid')
     path: Path
@@ -1285,48 +1361,60 @@ class FileReport(ReportBase):
 class StepReport(ReportBase):
     """Single unit of work within a file or batch.
 
-    A step succeeds if
-    it is explicitly marked ``SUCCESS`` or, when not terminal, if all
-    recorded checks pass and no errors are present.
+    A step succeeds if it is explicitly marked ``SUCCESS`` or, when not
+    terminal, if all recorded checks pass and no errors are present.
+
+    Aggregates validation checks and lifecycle metadata inherited from
+    [`ReportBase`][pipeline_watcher.core.ReportBase].
 
     Attributes
     ----------
-    label : str or None
+    # StepReport-specific
+    label : str
         Human-readable label for UI display.
-    id (optional) : str
+    id : str or None
         Machine-friendly identifier (e.g., ``"parse"``, ``"analyze"``).
     checks : list[Check]
         Recorded boolean validations for this step.
+
+    # Inherited lifecycle fields (see ReportBase)
     status : Status
-        Lifecycle state inherited from :class:`ReportBase`.
+        Lifecycle status (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
     percent : int
-        Optional progress indicator (0..100).
+        Progress percentage (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    started_at : datetime | None
+        When processing started (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    finished_at : datetime | None
+        When processing finished (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
     notes : list[str]
-        Narrative messages intended for UI.
-    warnings : list[str]
-        Non-fatal issues.
+        Narrative messages (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
     errors : list[str]
-        Fatal issues; presence typically implies failure.
+        Fatal issues (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    warnings : list[str]
+        Non-fatal issues (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
     metadata : dict[str, Any]
-        Arbitrary structured context.
+        Arbitrary structured context (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
     review : ReviewFlag
-        HITL review flag attached to the step.
+        HITL review flag (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
     report_version : str
-        Schema version for persisted artifacts.
+        Schema version (see [`ReportBase`][pipeline_watcher.core.ReportBase]).
+    duration_ms : float or None
+        Computed elapsed time in milliseconds.
 
     Notes
     -----
-    `id` is optional because in some cases the burdern to construct a unique id
-        is placed on the container (e.g. FileReport). Therefore, the unique id
-        construction is by default deferred to the container.
-    The auto-generated initializer accepts the same fields as attributes.
+    - ``id`` may be omitted; containers such as
+      [`FileReport`][pipeline_watcher.core.FileReport] often assign a unique ID.
+    - The auto-generated initializer accepts the same fields as attributes.
+    - Lifecycle semantics (``start``, ``end``, ``succeed``, ``fail``,
+      ``skip``) are defined in [`ReportBase`][pipeline_watcher.core.ReportBase].
 
     Examples
     --------
     >>> st = StepReport.begin("Extract text (OCR)")
-    ... st.add_check("ocr_quality>=0.9", ok=True)
-    ... st.end() # note end is typically called via e.g. FileReport.append_step where other finalization occurs.
-    ... st.succeeded
+    >>> st.add_check("ocr_quality>=0.9", ok=True)
+    >>> st.end()  # end is typically called by FileReport.append_step
+    >>> st.succeeded
     True
     >>> st.terminal
     True
