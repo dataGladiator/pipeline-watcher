@@ -31,6 +31,7 @@ theme:
 
 plugins:
   - search
+A  - autorefs
   - mkdocstrings:
       handlers:
         python:
@@ -109,12 +110,16 @@ plugins:
             show_root_toc_entry: false
 #
 #            # ✅ use recognized top-level options (no 'selection:' block)
-            summary: true
+            summary:
+              attributes: true
+              classes: true
+              functions: true
+
             members: true
-            inherited_members: true  # Prevents child methods from appearing under base
+            inherited_members: true
 #            merge_init_into_class: false  # Avoids confusion with __init__
-#            filters:
-#              - "!^_"   # hide private names starting with underscore
+            filters:
+              - "!^_"   # hide private names starting with underscore
   - include-markdown
 
 
