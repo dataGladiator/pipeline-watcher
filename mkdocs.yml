@@ -31,7 +31,7 @@ theme:
 
 plugins:
   - search
-A  - autorefs
+  - autorefs
   - mkdocstrings:
       handlers:
         python:
