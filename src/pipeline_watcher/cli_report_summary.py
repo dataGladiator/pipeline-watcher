@@ -206,14 +206,19 @@ def collect_tracebacks(report: PipelineReport) -> List[tuple[str, str, str]]:
 # ------------------------
 
 def print_summary(report: PipelineReport) -> None:
-    kind = report.kind.capitalize()
-    succeeded_str = str(getattr(report, "succeeded", None))
+    # Kind is e.g. "validation" | "process" | "test"
+    kind = (report.kind or "pipeline").capitalize()
+
+    # Use the new roll-up status field (computed_field on PipelineReport)
+    status_str = _status_str(report)
+
     total_steps, total_files = count_files_and_steps(report)
 
-    print(f"{kind} {succeeded_str}")
+    print(f"{kind} status: {status_str}")
     print(f"Total number of steps: {total_steps}")
     print(f"Total number of files: {total_files}")
     print()
+
 
 
 # Map column keys → human-friendly header labels
