@@ -8,7 +8,7 @@ The intent is to keep these pieces framework-agnostic and JSON-friendly.
 # std lib imports
 from __future__ import annotations
 import os
-from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol, TypeVar
+from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol, TypeVar, Self
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 import time, traceback, contextvars, warnings
@@ -691,7 +691,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
     report_version: str = SCHEMA_VERSION
     defer_start: bool = Field(default=False, exclude=True, repr=False)
 
-    def error(self, msg: str) -> "ReportBase":
+    def error(self, msg: str) -> Self:
         """Append an error message (does not change status).
 
         Note
@@ -716,7 +716,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         self.errors.append(msg)
         return self
 
-    def end(self) -> "ReportBase":
+    def end(self) -> Self:
         """Finalize the unit if not already terminal.
 
         If already terminal (``SUCCESS``, ``FAILED``, ``SKIPPED``), this stamps
@@ -735,7 +735,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
             return self
         return self.succeed() if self.ok else self.fail("One or more file steps failed")
 
-    def fail(self, message: Optional[str] = None) -> "ReportBase":
+    def fail(self, message: Optional[str] = None) -> Self:
         """Finalize as failed (``FAILED``).
 
         Parameters
@@ -759,7 +759,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         if not self.defer_start and self.pending:
             self.start()
 
-    def note(self, msg: str) -> "ReportBase":
+    def note(self, msg: str) -> Self:
         """Append a user-facing note.
 
         Parameters
@@ -775,7 +775,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         self.notes.append(msg)
         return self
 
-    def skip(self, reason: Optional[str] = None) -> "ReportBase":
+    def skip(self, reason: Optional[str] = None) -> Self:
         """Finalize as skipped (``SKIPPED``).
 
         Parameters
@@ -794,7 +794,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         self.finished_at = _now()
         return self
 
-    def start(self) -> "ReportBase":
+    def start(self) -> Self:
         """Mark the unit as running and stamp ``started_at`` if missing.
 
         Returns
@@ -813,7 +813,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
             self.started_at = _now()
         return self
 
-    def succeed(self) -> "ReportBase":
+    def succeed(self) -> Self:
         """Finalize successfully (``SUCCEEDED``) and set ``percent=100``.
 
         Also stamps ``finished_at`` to the current time.
@@ -828,7 +828,7 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         self.finished_at = _now()
         return self
 
-    def warn(self, msg: str) -> "ReportBase":
+    def warn(self, msg: str) -> Self:
         """Append a non-fatal warning.
 
         Parameters
@@ -883,27 +883,27 @@ class ReportBase(BaseModel, ABC, ReviewHelpers):
         return self.status.failed
 
     @property
-    def pending(self):
+    def pending(self) -> bool:
         """Return ``True`` if the unit is pending."""
         return self.status.pending
 
     @property
-    def running(self):
+    def running(self) -> bool:
         """Return ``True`` if the unit is running."""
         return self.status.running
 
     @property
-    def skipped(self):
+    def skipped(self) -> bool:
         """Return ``True`` if the unit was skipped."""
         return self.status.skipped
 
     @property
-    def succeeded(self):
+    def succeeded(self) -> bool:
         """Return ``True`` if the unit has succeeded."""
         return self.status.succeeded
 
     @property
-    def terminal(self):
+    def terminal(self) -> bool:
         """Return ``True`` if the unit is terminal."""
         return self.status.terminal
 
@@ -980,7 +980,7 @@ class FileReport(ReportBase):
         id: str | None = None,
         note: str | None = None,
         metadata: dict | None = None,
-    ) -> "FileReport":
+    ) -> Self:
         """Create a ``SUCCEEDED`` step and append it (chainable).
 
         Parameters
@@ -1015,7 +1015,7 @@ class FileReport(ReportBase):
         id: str | None = None,
         reason: str | None = None,
         metadata: dict | None = None,
-    ) -> "FileReport":
+    ) -> Self:
         """Create a ``FAILED`` step and append it (chainable).
 
         Parameters
@@ -1035,7 +1035,7 @@ class FileReport(ReportBase):
             Self.
         """
         sid = id or self._make_unique_step_id(label)
-        step = StepReport.begin(sid, label=label)
+        step = StepReport.begin(label, id=sid)
         if metadata:
             step.metadata.update(metadata)
         step.fail(reason)
@@ -1048,7 +1048,7 @@ class FileReport(ReportBase):
         id: str | None = None,
         reason: str | None = None,
         metadata: dict | None = None,
-    ) -> "FileReport":
+    ) -> Self:
         """Create a ``SKIPPED`` step and append it (chainable).
 
         Parameters
@@ -1068,7 +1068,7 @@ class FileReport(ReportBase):
             Self.
         """
         sid = id or self._make_unique_step_id(label)
-        step = StepReport.begin(sid, label=label)
+        step = StepReport.begin(label, id=sid)
         if metadata:
             step.metadata.update(metadata)
         step.skip(reason)
@@ -1082,7 +1082,7 @@ class FileReport(ReportBase):
         reason: str | None = None,
         metadata: dict | None = None,
         mark_success: bool = True,
-    ) -> "FileReport":
+    ) -> Self:
         """Create a step that requests HITL review, then append it.
 
         By default the step is marked ``SUCCESS`` (common pattern: “passed
@@ -1108,7 +1108,7 @@ class FileReport(ReportBase):
             Self.
         """
         sid = id or self._make_unique_step_id(label)
-        step = StepReport.begin(sid, label=label).request_review(reason)
+        step = StepReport.begin(label, id=sid).request_review(reason)
         if metadata:
             step.metadata.update(metadata)
         if mark_success:
@@ -1118,7 +1118,7 @@ class FileReport(ReportBase):
 
     def append_step(self,
                     step: StepReport,
-                    max_steps: int = 10_000) -> "FileReport":
+                    max_steps: int = 10_000) -> Self:
         """Finalize and append a step; recompute aggregate percent.
 
         The step is finalized via [StepReport.end](.#pipeline_watcher.StepReport.end), appended to
@@ -1156,7 +1156,7 @@ class FileReport(ReportBase):
               file_id: str | None = None,
               n_steps: int = 1,
               metadata: dict | None = None
-    ) -> "FileReport":
+    ) -> Self:
         """Construct and mark the file report as running.
 
         Parameters
@@ -1228,14 +1228,14 @@ class FileReport(ReportBase):
 
     @computed_field
     @property
-    def mime_type(self) -> Optional[str]:
+    def mime_type(self) -> str | None:
         # Extension-based guess; no filesystem touch
         mt, _ = mimetypes.guess_type(self.path.as_posix())
         return mt
 
     @computed_field
     @property
-    def size_bytes(self) -> Optional[int]:
+    def size_bytes(self) -> int | None:
         """Best-effort determination of file's size in bytes.
         Avoid raising on missing/inaccessible paths."""
         try:
@@ -1262,7 +1262,7 @@ class FileReport(ReportBase):
 
     @computed_field
     @property
-    def human_review_reason(self) -> Optional[str]:
+    def human_review_reason(self) -> str | None:
         """Compact human-readable reason summarizing review needs (computed).
 
         Combines file-level reason (if present) with a roll-up of flagged steps.
@@ -1287,7 +1287,11 @@ class FileReport(ReportBase):
             count = len(flagged)
             # show up to 5 step names; add a "+N more" if needed
             def step_name(st: StepReport) -> str:
-                return st.label or st.id
+                if st.label is not None:
+                    return st.label
+                elif st.id is not None:
+                    return st.id
+                return 'unknown-step'
 
             names = [step_name(s) for s in flagged[:5]]
             more = count - len(names)
@@ -1302,7 +1306,7 @@ class FileReport(ReportBase):
 
     @field_validator("path", mode="before")
     @classmethod
-    def _coerce_path(cls, v):
+    def _coerce_path(cls, v) -> Path:
         if isinstance(v, (str, Path)):
             p = Path(v)
             if str(p) == "":
@@ -1426,7 +1430,7 @@ class StepReport(ReportBase):
     checks: List[Check] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _default_id(self):
+    def _default_id(self) -> Self:
         # Treat None/"" as unset; drop the `or self.label == ""` part if "" is meaningful
         if self.id is None or self.id == "":
             # When frozen, use object.__setattr__ during construction-time adjustments
@@ -1434,7 +1438,7 @@ class StepReport(ReportBase):
         return self
 
     @classmethod
-    def begin(cls, label: str, *, id: str | None = None) -> "StepReport":
+    def begin(cls, label: str, *, id: str | None = None) -> Self:
         """Construct and mark the step as started.
 
         Parameters
@@ -1472,7 +1476,11 @@ class StepReport(ReportBase):
         if not all_checks_passed:
             for check in self.checks:
                 if not check.ok:
-                    self.errors.append(check.detail)
+                    if check.detail is not None:
+                        self.errors.append(check.detail)
+                    else:
+                        # TODO: think of a better way to handle this
+                        self.errors.append('Unknown check fail.')
         return all_checks_passed
 
     def add_check(self, name: str, ok: bool, detail: Optional[str] = None) -> None:
@@ -1528,7 +1536,7 @@ def bind_pipeline(pr: "PipelineReport"):
     Examples
     --------
     >>> report = PipelineReport(...)
-    >>> with bind_pipeline(report):
+    >>> with bind_pipeline(report): # doctest: +SKIP
     ...     # Inside this block, pipeline_step(None, ...) will use `report`
     ...     with pipeline_step(None, "discover", label="Discover inputs") as st:
     ...         st.note("Scanning directory")
@@ -1543,9 +1551,9 @@ def bind_pipeline(pr: "PipelineReport"):
 @contextmanager
 def pipeline_step(
     pr: Optional["PipelineReport"],
-    id: str,
+    label: str,
     *,
-    label: str | None = None,
+    id: str | None = None,
     banner_stage: str | None = None,
     banner_percent: int | None = None,
     banner_message: str | None = None,
@@ -1611,7 +1619,7 @@ def pipeline_step(
     --------
     Minimal with bound pipeline:
     >>> report = PipelineReport(...)
-    >>> with bind_pipeline(report):
+    >>> with bind_pipeline(report): # doctest: +SKIP
     ...     with pipeline_step(None, "index", label="Index batch") as st:
     ...         st.add_check("manifest_present", ok=True)
 
@@ -1627,7 +1635,7 @@ def pipeline_step(
     ...     # proceed with calculation...
     """
     pr = pr or _current_pipeline_report.get()
-    st = StepReport.begin(id, label=label)
+    st = StepReport.begin(label, id=id)
     t0 = time.perf_counter()
 
     if pr is not None and set_stage_on_enter:
@@ -1665,268 +1673,8 @@ def pipeline_step(
             raise exc
 
 
-@contextmanager
-def bind_pipeline(pr: "PipelineReport"):
-    """Bind a :class:`PipelineReport` to the current context.
-
-    Lets nested helpers (e.g., :func:`pipeline_step`, :func:`pipeline_file`)
-    discover the active pipeline via a thread/async-safe context variable,
-    so you don’t have to pass ``pr`` explicitly.
-
-    Parameters
-    ----------
-    pr : PipelineReport
-        The pipeline to bind for the duration of the context.
-
-    Yields
-    ------
-    PipelineReport
-        The same report object (convenience).
-
-    Examples
-    --------
-    >>> report = PipelineReport(...)
-    ... with bind_pipeline(report):
-    ...     # inside, helpers can omit `pr`
-    ...     ...
-    """
-    token = _current_pipeline_report.set(pr)
-    try:
-        yield pr
-    finally:
-        _current_pipeline_report.reset(token)
-
 
 _SETTINGS_KEYS: set[str] = {f.name for f in fields(WatcherSettings)}
-
-
-@contextmanager
-def pipeline_file(
-    pr: Optional["PipelineReport"],
-    path: Path | str,
-    *,
-    file_id: str | None = None,
-    metadata: dict | None = None,
-    set_stage_on_enter: bool = False,
-    banner_stage: str | None = None,
-    banner_percent_on_exit: int | None = None,
-    banner_message_on_exit: str | None = None,
-    **other_options,
-):
-    """
-    Per-file processing block using WatcherSettings as the source of truth.
-
-    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True)
-    and they will apply only within this context; otherwise the current
-    context settings are used.
-    """
-    settings_overrides = {k: v for k, v in other_options.items() if k in _SETTINGS_KEYS}
-
-    # Bind to a pipeline if not explicitly provided
-    pr = pr or _current_pipeline_report.get(None)
-    if pr is None:
-        raise RuntimeError(
-            "pipeline_file requires a PipelineReport: pass `pr=` or call within `with bind_pipeline(pr):`"
-        )
-
-    if not isinstance(path, (str, os.PathLike)):
-        raise ValueError(f"path must be str or os.PathLike, not {type(path)!r}")
-
-    # Apply settings overrides (if any) only for this block
-    with use_settings(**settings_overrides) as settings:
-        fr = FileReport.begin(
-            path=Path(path),
-            file_id=file_id,
-            metadata=dict(metadata) if metadata else {},
-        )
-        fr._pipeline = pr
-
-        # Optional banner update on enter
-        if set_stage_on_enter:
-            pr.set_progress(
-                stage=banner_stage or fr.name,   # name always present from path
-                percent=pr.percent,
-                message=pr.message,
-            )
-
-        # Optional capture (settings-driven)
-        stdout_buf = StringIO() if settings.capture_streams else None
-        stderr_buf = StringIO() if settings.capture_streams else None
-        warn_list: list[warnings.WarningMessage] | None = None
-
-        with ExitStack() as stack:
-            if settings.capture_warnings:
-                warn_list = stack.enter_context(warnings.catch_warnings(record=True))
-                warnings.simplefilter("default")
-            if settings.capture_streams:
-                if stdout_buf:
-                    stack.enter_context(redirect_stdout(stdout_buf))
-                if stderr_buf:
-                    stack.enter_context(redirect_stderr(stderr_buf))
-
-            encountered_exception = False
-            try:
-                yield fr
-                fr.end() # not strictly necessary, but end is idempotent, and user may forget.
-            except BaseException as e:
-                # --- Always record first ---
-                encountered_exception = True
-                fr.errors.append(f"{type(e).__name__}: {e}")
-                if settings.store_traceback:
-                    tb = "".join(
-                        traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit)
-                    )
-                    if tb:
-                        fr.metadata["traceback"] = tb
-                fr.fail("Unhandled exception while processing file")
-
-                # --- Decide raising via settings helpers ---
-                if settings.should_raise(e):
-                    raise
-                if (msg := settings.suppression_breadcrumb(e)):
-                    fr.warnings.append(msg)
-            finally:
-                # Persist diagnostics
-                if stdout_buf is not None:
-                    fr.metadata["stdout"] = stdout_buf.getvalue()
-                if stderr_buf is not None:
-                    fr.metadata["stderr"] = stderr_buf.getvalue()
-                if warn_list is not None:
-                    fr.metadata["warnings"] = [
-                        f"{w.category.__name__}: {w.message}"  # type: ignore[attr-defined]
-                        for w in warn_list
-                    ]
-                fr.end()
-
-                # Append to pipeline and (optionally) update banner on exit
-                try:
-                    pr.append_file(fr)
-                    if (banner_stage is not None
-                        or banner_percent_on_exit is not None
-                        or banner_message_on_exit is not None):
-                        pr.set_progress(
-                            stage=banner_stage or pr.stage,
-                            percent=pr.percent if banner_percent_on_exit is None else banner_percent_on_exit,
-                            message=banner_message_on_exit or pr.message,
-                        )
-                finally:
-                    # Best-effort save-on-exception
-                    if encountered_exception and settings.save_on_exception:
-                        try:
-                            save_path = settings.exception_save_path_override or pr.output_path
-                            if save_path:
-                                pr.save(save_path)
-                            else:
-                                fr.warnings.append("auto-save skipped: no output path configured")
-                        except Exception as save_err:
-                            fr.warnings.append(f"save failed: {save_err!r}")
-
-
-@contextmanager
-def file_step(
-    file_report: FileReport,
-    label: str,
-    *,
-    id: str | None = None,
-    **other_options,
-):
-    """
-    Context manager for a step inside a FileReport, governed by WatcherSettings.
-
-    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True).
-    They apply only within this context; otherwise current settings are used.
-    """
-    settings_overrides = {
-        k: v for k, v in other_options.items() if k in _SETTINGS_KEYS
-    }
-
-    with use_settings(**settings_overrides) as settings:
-        st = StepReport.begin(label, id=id)
-
-        stdout_buf = StringIO() if settings.capture_streams else None
-        stderr_buf = StringIO() if settings.capture_streams else None
-        warn_list: list[warnings.WarningMessage] | None = None
-        encountered_exception = False
-
-        with ExitStack() as stack:
-            if settings.capture_warnings:
-                warn_list = stack.enter_context(
-                    warnings.catch_warnings(record=True)
-                )
-                warnings.simplefilter("default")
-
-            if settings.capture_streams:
-                if stdout_buf is not None:
-                    stack.enter_context(redirect_stdout(stdout_buf))
-                if stderr_buf is not None:
-                    stack.enter_context(redirect_stderr(stderr_buf))
-
-            try:
-                yield st
-                st.end() # fallback in case user forgets.
-
-            except BaseException as e:
-                encountered_exception = True
-                exc_type_name = type(e).__name__
-
-                st.errors.append(f"{exc_type_name}: {e}")
-
-                if settings.store_traceback:
-                    tb = "".join(
-                        traceback.format_exception(
-                            type(e), e, e.__traceback__,
-                            limit=settings.traceback_limit,
-                        )
-                    )
-                    if tb:
-                        st.metadata["traceback"] = tb
-
-                st.fail(f"Unhandled {exc_type_name} in file step")
-
-                if settings.should_raise(e):
-                    raise
-
-                if msg := settings.suppression_breadcrumb(e):
-                    st.warnings.append(msg)
-
-            finally:
-                if stdout_buf is not None:
-                    st.metadata["stdout"] = stdout_buf.getvalue()
-                if stderr_buf is not None:
-                    st.metadata["stderr"] = stderr_buf.getvalue()
-                if warn_list is not None:
-                    st.metadata["warnings"] = [
-                        f"{w.category.__name__}: {w.message}"
-                        for w in warn_list
-                    ]
-
-                # Finalize step via FileReport: append_step calls st.end(),
-                # enforces id uniqueness, updates timestamps, etc.
-                file_report.append_step(st)
-
-                # Auto-save via owning pipeline, if available
-                if encountered_exception and settings.save_on_exception:
-                    pipeline = getattr(file_report, "pipeline", None)
-                    if pipeline is not None:
-                        try:
-                            save_path = (
-                                settings.exception_save_path_override
-                                or pipeline.output_path
-                            )
-                            if save_path:
-                                pipeline.save(save_path)
-                            else:
-                                st.warnings.append(
-                                    "auto-save skipped: no pipeline output path configured"
-                                )
-                        except Exception as save_err:
-                            st.warnings.append(f"save failed: {save_err!r}")
-                    else:
-                        # Invariant *should* be: file_report is always tied to a pipeline.
-                        # But this keeps the behavior graceful if that’s ever relaxed.
-                        st.warnings.append(
-                            "auto-save skipped: file_report not attached to a pipeline"
-                        )
 
 
 @contextmanager
@@ -2034,3 +1782,110 @@ def pipeline_step(
                             st.warnings.append("auto-save skipped: no output path configured")
                     except Exception as save_err:
                         st.warnings.append(f"save failed: {save_err!r}")
+
+
+@contextmanager
+def file_step(
+    file_report: FileReport,
+    label: str,
+    *,
+    id: str | None = None,
+    **other_options,
+):
+    """
+    Context manager for a step inside a FileReport, governed by WatcherSettings.
+
+    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True).
+    They apply only within this context; otherwise current settings are used.
+    """
+    settings_overrides = {
+        k: v for k, v in other_options.items() if k in _SETTINGS_KEYS
+    }
+
+    with use_settings(**settings_overrides) as settings:
+        st = StepReport.begin(label, id=id)
+
+        stdout_buf = StringIO() if settings.capture_streams else None
+        stderr_buf = StringIO() if settings.capture_streams else None
+        warn_list: list[warnings.WarningMessage] | None = None
+        encountered_exception = False
+
+        with ExitStack() as stack:
+            if settings.capture_warnings:
+                warn_list = stack.enter_context(
+                    warnings.catch_warnings(record=True)
+                )
+                warnings.simplefilter("default")
+
+            if settings.capture_streams:
+                if stdout_buf is not None:
+                    stack.enter_context(redirect_stdout(stdout_buf))
+                if stderr_buf is not None:
+                    stack.enter_context(redirect_stderr(stderr_buf))
+
+            try:
+                yield st
+                st.end() # fallback in case user forgets.
+
+            except BaseException as e:
+                encountered_exception = True
+                exc_type_name = type(e).__name__
+
+                st.errors.append(f"{exc_type_name}: {e}")
+
+                if settings.store_traceback:
+                    tb = "".join(
+                        traceback.format_exception(
+                            type(e), e, e.__traceback__,
+                            limit=settings.traceback_limit,
+                        )
+                    )
+                    if tb:
+                        st.metadata["traceback"] = tb
+
+                st.fail(f"Unhandled {exc_type_name} in file step")
+
+                if settings.should_raise(e):
+                    raise
+
+                if msg := settings.suppression_breadcrumb(e):
+                    st.warnings.append(msg)
+
+            finally:
+                if stdout_buf is not None:
+                    st.metadata["stdout"] = stdout_buf.getvalue()
+                if stderr_buf is not None:
+                    st.metadata["stderr"] = stderr_buf.getvalue()
+                if warn_list is not None:
+                    st.metadata["warnings"] = [
+                        f"{w.category.__name__}: {w.message}"
+                        for w in warn_list
+                    ]
+
+                # Finalize step via FileReport: append_step calls st.end(),
+                # enforces id uniqueness, updates timestamps, etc.
+                file_report.append_step(st)
+
+                # Auto-save via owning pipeline, if available
+                if encountered_exception and settings.save_on_exception:
+                    pipeline = getattr(file_report, "pipeline", None)
+                    if pipeline is not None:
+                        try:
+                            save_path = (
+                                settings.exception_save_path_override
+                                or pipeline.output_path
+                            )
+                            if save_path:
+                                pipeline.save(save_path)
+                            else:
+                                st.warnings.append(
+                                    "auto-save skipped: no pipeline output path configured"
+                                )
+                        except Exception as save_err:
+                            st.warnings.append(f"save failed: {save_err!r}")
+                    else:
+                        # Invariant *should* be: file_report is always tied to a pipeline.
+                        # But this keeps the behavior graceful if that’s ever relaxed.
+                        st.warnings.append(
+                            "auto-save skipped: file_report not attached to a pipeline"
+                        )
