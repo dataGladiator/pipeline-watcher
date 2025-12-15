@@ -1548,132 +1548,6 @@ def bind_pipeline(pr: "PipelineReport"):
         _current_pipeline_report.reset(token)
 
 
-@contextmanager
-def pipeline_step(
-    pr: Optional["PipelineReport"],
-    label: str,
-    *,
-    id: str | None = None,
-    banner_stage: str | None = None,
-    banner_percent: int | None = None,
-    banner_message: str | None = None,
-    set_stage_on_enter: bool = False,
-    raise_on_exception: bool = False,
-    save_on_exception: bool = True,
-    output_path_override: str | Path | None = None,
-):
-    """Context manager for a **batch-level** step.
-
-    Creates a :class:`StepReport`, times it, captures exceptions (optional
-    re-raise), and appends it to the provided or bound pipeline. Also supports
-    updating the pipeline's progress banner on enter/exit.
-
-    Parameters
-    ----------
-    pr : PipelineReport or None
-        Pipeline to append the step to. If ``None``, uses the pipeline bound
-        via :func:`bind_pipeline`. If neither is available, the step is still
-        yielded but not appended.
-    id : str
-        Machine-friendly step id (e.g., ``"validate_manifest"``).
-    label : str, optional
-        Human-friendly label for UI display.
-    banner_stage : str, optional
-        Stage label to set on the pipeline banner after appending the step
-        (or on enter if ``set_stage_on_enter=True``). Defaults to ``id`` when
-        provided as ``None``.
-    banner_percent : int, optional
-        Percent to set on the banner after appending. If ``None``, leaves the
-        current percent unchanged.
-    banner_message : str, optional
-        Message to set on the banner (falls back to existing message if ``None``).
-    set_stage_on_enter : bool, default False
-        If ``True``, set the banner's ``stage``/``message`` when entering the
-        context (percent remains unchanged on enter).
-    raise_on_exception : bool, default False
-        If ``True``, re-raise the exception after recording it on the step.
-        If ``False``, swallow after recording so the pipeline can continue.
-    save_on_exception : bool, default True
-        If an exception occurs and a pipeline is available, attempt to save
-        the pipeline JSON immediately (best-effort).
-    output_path_override : str or Path or None, optional
-        When saving on exception, write to this path instead of
-        ``pr.output_path`` if provided.
-
-    Yields
-    ------
-    StepReport
-        The live step report to populate within the ``with`` block.
-
-    Notes
-    -----
-    - Exceptions inside the block are recorded as:
-      - ``errors += [\"{Type}: {message}\"]``
-      - ``metadata['traceback'] = traceback.format_exc()``
-      - status set to ``FAILED`` via ``st.fail(...)``
-    - If a pipeline is available, the step is finalized via ``st.end()``,
-      appended with :meth:`PipelineReport.append_step`, and the banner is
-      optionally updated.
-
-    Examples
-    --------
-    Minimal with bound pipeline:
-    >>> report = PipelineReport(...)
-    >>> with bind_pipeline(report): # doctest: +SKIP
-    ...     with pipeline_step(None, "index", label="Index batch") as st:
-    ...         st.add_check("manifest_present", ok=True)
-
-    Update the banner and save immediately on error:
-
-    >>> with pipeline_step(
-    ...     report, "extract",
-    ...     banner_stage="extract",
-    ...     banner_percent=40,
-    ...     banner_message="Extracting data…",
-    ...     save_on_exception=True,
-    ... ):
-    ...     # proceed with calculation...
-    """
-    pr = pr or _current_pipeline_report.get()
-    st = StepReport.begin(label, id=id)
-    t0 = time.perf_counter()
-
-    if pr is not None and set_stage_on_enter:
-        pr.set_progress(stage=banner_stage or id, percent=pr.percent, message=banner_message or pr.message)
-
-    exc: BaseException | None = None
-    try:
-        yield st
-        st.end()
-    except BaseException as e:
-        exc = e
-        st.errors.append(f"{type(e).__name__}: {e}")
-        st.metadata["traceback"] = traceback.format_exc()
-        st.fail("Unhandled exception")
-    finally:
-
-        if pr is not None:
-            try:
-                pr.append_step(st)
-                if any(v is not None for v in (banner_stage, banner_percent, banner_message)):
-                    pr.set_progress(
-                        stage=banner_stage or (pr.stage or id),
-                        percent=pr.percent if banner_percent is None else banner_percent,
-                        message=banner_message or pr.message,
-                    )
-            finally:
-                if exc and save_on_exception:
-                    try:
-                        print(f"trying to save to {output_path_override or pr.output_path}")
-                        pr.save(output_path_override or pr.output_path)
-                    except Exception as save_err:
-                        st.warnings.append(f"save failed: {save_err!r}")
-
-        if exc and raise_on_exception:
-            raise exc
-
-
-
 _SETTINGS_KEYS: set[str] = {f.name for f in fields(WatcherSettings)}
 
 
@@ -1782,6 +1656,130 @@ def pipeline_step(
                             st.warnings.append("auto-save skipped: no output path configured")
                     except Exception as save_err:
                         st.warnings.append(f"save failed: {save_err!r}")
+
+
+@contextmanager
+def pipeline_file(
+    pr: Optional["PipelineReport"],
+    path: Path | str,
+    *,
+    file_id: str | None = None,
+    metadata: dict | None = None,
+    set_stage_on_enter: bool = False,
+    banner_stage: str | None = None,
+    banner_percent_on_exit: int | None = None,
+    banner_message_on_exit: str | None = None,
+    **other_options,
+):
+    """
+    Per-file processing block using WatcherSettings as the source of truth.
+
+    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True)
+    and they will apply only within this context; otherwise the current
+    context settings are used.
+    """
+    settings_overrides = {k: v for k, v in other_options.items() if k in _SETTINGS_KEYS}
+
+    # Bind to a pipeline if not explicitly provided
+    pr = pr or _current_pipeline_report.get(None)
+    if pr is None:
+        raise RuntimeError(
+            "pipeline_file requires a PipelineReport: pass `pr=` or call within `with bind_pipeline(pr):`"
+        )
+
+    if not isinstance(path, (str, os.PathLike)):
+        raise ValueError(f"path must be str or os.PathLike, not {type(path)!r}")
+
+    # Apply settings overrides (if any) only for this block
+    with use_settings(**settings_overrides) as settings:
+        fr = FileReport.begin(
+            path=Path(path),
+            file_id=file_id,
+            metadata=dict(metadata) if metadata else {},
+        )
+        fr._pipeline = pr
+
+        # Optional banner update on enter
+        if set_stage_on_enter:
+            pr.set_progress(
+                stage=banner_stage or fr.name,   # name always present from path
+                percent=pr.percent,
+                message=pr.message,
+            )
+
+        # Optional capture (settings-driven)
+        stdout_buf = StringIO() if settings.capture_streams else None
+        stderr_buf = StringIO() if settings.capture_streams else None
+        warn_list: list[warnings.WarningMessage] | None = None
+
+        with ExitStack() as stack:
+            if settings.capture_warnings:
+                warn_list = stack.enter_context(warnings.catch_warnings(record=True))
+                warnings.simplefilter("default")
+            if settings.capture_streams:
+                if stdout_buf:
+                    stack.enter_context(redirect_stdout(stdout_buf))
+                if stderr_buf:
+                    stack.enter_context(redirect_stderr(stderr_buf))
+
+            encountered_exception = False
+            try:
+                yield fr
+                fr.end() # not strictly necessary, but end is idempotent, and user may forget.
+            except BaseException as e:
+                # --- Always record first ---
+                encountered_exception = True
+                fr.errors.append(f"{type(e).__name__}: {e}")
+                if settings.store_traceback:
+                    tb = "".join(
+                        traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit)
+                    )
+                    if tb:
+                        fr.metadata["traceback"] = tb
+                fr.fail("Unhandled exception while processing file")
+
+                # --- Decide raising via settings helpers ---
+                if settings.should_raise(e):
+                    raise
+                if (msg := settings.suppression_breadcrumb(e)):
+                    fr.warnings.append(msg)
+            finally:
+                # Persist diagnostics
+                if stdout_buf is not None:
+                    fr.metadata["stdout"] = stdout_buf.getvalue()
+                if stderr_buf is not None:
+                    fr.metadata["stderr"] = stderr_buf.getvalue()
+                if warn_list is not None:
+                    fr.metadata["warnings"] = [
+                        f"{w.category.__name__}: {w.message}"  # type: ignore[attr-defined]
+                        for w in warn_list
+                    ]
+                fr.end()
+
+                # Append to pipeline and (optionally) update banner on exit
+                try:
+                    pr.append_file(fr)
+                    if (banner_stage is not None
+                        or banner_percent_on_exit is not None
+                        or banner_message_on_exit is not None):
+                        pr.set_progress(
+                            stage=banner_stage or pr.stage,
+                            percent=pr.percent if banner_percent_on_exit is None else banner_percent_on_exit,
+                            message=banner_message_on_exit or pr.message,
+                        )
+                finally:
+                    # Best-effort save-on-exception
+                    if encountered_exception and settings.save_on_exception:
+                        try:
+                            save_path = settings.exception_save_path_override or pr.output_path
+                            if save_path:
+                                pr.save(save_path)
+                            else:
+                                fr.warnings.append("auto-save skipped: no output path configured")
+                        except Exception as save_err:
+                            fr.warnings.append(f"save failed: {save_err!r}")
+
+
 
 
 @contextmanager
