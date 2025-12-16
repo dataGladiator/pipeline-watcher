@@ -14,31 +14,28 @@ from contextlib import contextmanager
 import time, traceback, contextvars, warnings
 from io import StringIO
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
-from enum import Enum, auto
+from enum import StrEnum, auto
 from datetime import datetime
 from pathlib import Path
 from dataclasses import fields
 import mimetypes
 
 # third party import
-from pydantic import BaseModel, Field, computed_field, model_validator, field_validator
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import BaseModel, Field, computed_field, model_validator, field_validator, PrivateAttr
+
 
 # local imports
 from .clocks import now_utc as _now
 from .utilities import _slugify, _file_keys, _norm_key
 from .settings import WatcherSettings, use_settings
+from .io import atomic_write_json
 
 
 #: Schema version written to JSON artifacts.
 SCHEMA_VERSION = "v2"
 
-class LowerStrEnum(str, Enum):
-    def _generate_next_value_(name, start, count, last_values):
-        return name.lower()
 
-
-class Status(LowerStrEnum):
+class Status(StrEnum):
     """Lifecycle status for a unit of work."""
     PENDING = auto()     # Declared but not yet started.
     RUNNING = auto()     # In progress.
@@ -482,17 +479,15 @@ class PipelineReport(BaseModel):
             self,
             path: Path | str | None = None,
             *,
-            ensure_dir: bool = True,
+            ensure_dir: bool = True,  # can be ignored since atomic_write_json ensures it
             indent: int = 2,
             encoding: str = "utf-8",
     ) -> None:
         target = Path(path or self.output_path or "reports/progress.json")
-        if ensure_dir:
-            target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            self.model_dump_json(
-                indent=indent,
-            ),
+        atomic_write_json(
+            target,
+            self.model_dump(mode="json"),
+            indent=indent,
             encoding=encoding,
         )
 
@@ -970,7 +965,6 @@ class FileReport(ReportBase):
     path: Path
     file_id: Optional[str] = None
     steps: List[StepReport] = Field(default_factory=list)
-    n_steps: int = 1
     _pipeline: Optional["PipelineReport"] = PrivateAttr(default=None)
 
     def add_completed_step(
@@ -1154,7 +1148,6 @@ class FileReport(ReportBase):
     def begin(cls,
               path: Path | str,
               file_id: str | None = None,
-              n_steps: int = 1,
               metadata: dict | None = None
     ) -> Self:
         """Construct and mark the file report as running.
@@ -1165,8 +1158,6 @@ class FileReport(ReportBase):
             The path to file.
         file_id (optional) : str
             Stable file identifier.
-        n_steps : int, optional
-            Number of steps in process.
         metadata (optional): dict
             Dictionary of metadata about the file.
 
@@ -1177,7 +1168,6 @@ class FileReport(ReportBase):
         """
         return cls(path=Path(path),
                    file_id=file_id,
-                   n_steps=n_steps,
                    metadata=dict(metadata) if metadata else {}).start()
 
     @computed_field
@@ -1225,6 +1215,12 @@ class FileReport(ReportBase):
     def name(self) -> str:
         # read-only, derived; not persisted unless you include computed fields explicitly
         return self.path.name
+
+    @computed_field
+    @property
+    def n_steps(self) -> int:
+        return len(self.steps)
+
 
     @computed_field
     @property
@@ -1664,6 +1660,8 @@ def pipeline_file(
     path: Path | str,
     *,
     file_id: str | None = None,
+    file_save_to: Path | str | None = None,
+    pipeline_save_to: Path | str | None = None,
     metadata: dict | None = None,
     set_stage_on_enter: bool = False,
     banner_stage: str | None = None,
@@ -1672,11 +1670,63 @@ def pipeline_file(
     **other_options,
 ):
     """
-    Per-file processing block using WatcherSettings as the source of truth.
+    Context manager for processing a single file within a PipelineReport.
 
-    Pass any WatcherSettings fields as kwargs (e.g., raise_on_exception=True)
-    and they will apply only within this context; otherwise the current
-    context settings are used.
+    This block is responsible for:
+      - Creating and finalizing a FileReport for the file,
+      - Capturing warnings, stdout/stderr, and unhandled exceptions,
+      - Appending the finalized FileReport to the PipelineReport, and
+      - Persisting pipeline and/or file-level snapshots according to
+        the configured save policy.
+
+    Parameters
+    ----------
+    pr : PipelineReport or None
+        The pipeline report to attach this file to. If None, the currently
+        bound pipeline (via ``bind_pipeline``) is used. If no pipeline is
+        available, a RuntimeError is raised.
+    path : str or pathlib.Path
+        Filesystem path associated with this file (used for naming and
+        diagnostics).
+    file_id : str, optional
+        Stable identifier for the file, if available.
+    file_save_to : str or pathlib.Path, optional
+        If provided, a finalized snapshot of the *FileReport* is written
+        atomically to this path on exit (success or exception). The snapshot
+        is written only after diagnostics and exception handling are complete.
+    pipeline_save_to : str or pathlib.Path, optional
+        If provided, an additional atomic snapshot of the *PipelineReport*
+        is written to this path on exit. This is an additive copy and does
+        not replace the canonical pipeline output path.
+    metadata : dict, optional
+        Initial metadata to attach to the FileReport.
+    set_stage_on_enter : bool, optional
+        If True, update the pipeline progress stage when entering the block.
+    banner_stage, banner_percent_on_exit, banner_message_on_exit : optional
+        Optional progress banner updates applied on exit.
+    **other_options
+        Per-block overrides for WatcherSettings (e.g., ``raise_on_exception=True``).
+
+    Saving and Exception Semantics
+    ------------------------------
+    - The FileReport is always finalized (``end()``) before any persistence.
+    - If ``pr.output_path`` is set, the PipelineReport is atomically autosaved
+      on *every exit* (success or exception) after the FileReport is appended.
+    - If ``pipeline_save_to`` is provided, an additional copy of the pipeline
+      report is saved to that path.
+    - If ``file_save_to`` is provided, a per-file snapshot is saved atomically.
+    - If an exception occurs:
+        * It is always recorded on the FileReport.
+        * It is re-raised only if dictated by WatcherSettings.
+        * An exception-specific pipeline save is performed only if
+          ``exception_save_path_override`` is set to a distinct path.
+
+    Notes
+    -----
+    - All writes performed by this context manager are best-effort and atomic;
+      save failures are recorded as warnings and do not mask the original error.
+    - FileReport snapshots are intentionally saved only by this context manager
+      to guarantee they reflect a fully finalized state.
     """
     settings_overrides = {k: v for k, v in other_options.items() if k in _SETTINGS_KEYS}
 
@@ -1756,6 +1806,18 @@ def pipeline_file(
                     ]
                 fr.end()
 
+                # after fr.end()
+                if file_save_to is not None:
+                    try:
+                        atomic_write_json(
+                            Path(file_save_to),
+                            fr.model_dump(mode="json"),
+                            indent=2,
+                            encoding="utf-8",
+                        )
+                    except Exception as save_err:
+                        fr.warnings.append(f"file report save failed: {save_err!r}")
+
                 # Append to pipeline and (optionally) update banner on exit
                 try:
                     pr.append_file(fr)
@@ -1768,17 +1830,32 @@ def pipeline_file(
                             message=banner_message_on_exit or pr.message,
                         )
                 finally:
-                    # Best-effort save-on-exception
-                    if encountered_exception and settings.save_on_exception:
+
+                    # Canonical autosave
+                    if pr.output_path is not None:
                         try:
-                            save_path = settings.exception_save_path_override or pr.output_path
-                            if save_path:
-                                pr.save(save_path)
-                            else:
-                                fr.warnings.append("auto-save skipped: no output path configured")
+                            pr.save(pr.output_path)
+                        except Exception as save_err:
+                            fr.warnings.append(f"pipeline autosave failed: {save_err!r}")
+
+                    # Additional copy (Option B)
+                    if pipeline_save_to is not None:
+                        try:
+                            pr.save(pipeline_save_to)
+                        except Exception as save_err:
+                            fr.warnings.append(f"pipeline save_to failed: {save_err!r}")
+
+                    # Best-effort save-on-exception
+                    if (
+                        encountered_exception
+                        and settings.save_on_exception
+                        and settings.exception_save_path_override is not None
+                        and (pr.output_path is None or Path(settings.exception_save_path_override) != Path(pr.output_path))
+                    ):
+                        try:
+                            pr.save(settings.exception_save_path_override)
                         except Exception as save_err:
                             fr.warnings.append(f"save failed: {save_err!r}")
-
 
 
 
