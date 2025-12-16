@@ -16,52 +16,64 @@ dump_report(path, report)
 """
 
 from __future__ import annotations
-from pathlib import Path
 import json
 import os
 import tempfile
+from pathlib import Path
+from typing import Any, Mapping
 
 
 def atomic_write_json(
     path: Path,
-    data: dict,
+    data: Mapping[str, Any],
     *,
     indent: int = 2,
-    encoding: str = "utf-8"
+    encoding: str = "utf-8",
 ) -> None:
     """
     Write a JSON object atomically to disk.
 
     A temporary file is created in the same directory as the target file,
-    written to in full, and then atomically renamed to the final path.
-    This guarantees that the output file is either the **old complete file**
-    or the **new complete file**, never a partial write.
-
-    Parameters
-    ----------
-    path : pathlib.Path
-        Destination path for the JSON file. Parent directories are created
-        automatically if they do not exist.
-    data : dict
-        Python dictionary (or JSON-serializable mapping) to write.
-    indent : int, optional
-        Indentation level for the output JSON, by default 2.
-    encoding : str, optional
-        File encoding for the output, by default ``'utf-8'``.
-
-    Notes
-    -----
-    - The temporary file is created in the same directory as `path` to ensure
-      atomicity across filesystems.
-    - Existing files at `path` are replaced without truncation races.
+    written to in full, flushed + fsynced, and then atomically renamed to
+    the final path via os.replace.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        "w", delete=False, dir=path.parent, encoding=encoding
-    ) as tmp:
-        json.dump(data, tmp, indent=indent, ensure_ascii=False, default=str)
-        tmp_path = Path(tmp.name)
-    os.replace(tmp_path, path)
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            dir=path.parent,
+            encoding=encoding,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+            json.dump(data, tmp, indent=indent, ensure_ascii=False, default=str)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+
+        os.replace(tmp_path, path)
+
+        # Optional: fsync directory entry for extra durability on POSIX
+        # (Windows doesn't support fsync on directories)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+        except (AttributeError, NotImplementedError, OSError):
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+    finally:
+        # If something failed before os.replace, clean up temp file
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
 
 
 def dump_report(path: Path, report) -> None:
