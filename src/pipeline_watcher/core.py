@@ -1511,6 +1511,16 @@ _current_pipeline_report: contextvars.ContextVar[Optional["PipelineReport"]] = c
 )
 
 
+def exception_summary(e: BaseException) -> str:
+    # Prefer common “user-facing” attributes if present
+    for attr in ("user_message", "message", "detail"):
+        v = getattr(e, attr, None)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    # Fall back to normal repr
+    return f"{type(e).__name__}: {e}"
+
+
 @contextmanager
 def bind_pipeline(pr: "PipelineReport"):
     """Bind a :class:`PipelineReport` to the current context.
@@ -1777,22 +1787,27 @@ def pipeline_file(
                 yield fr
                 fr.end() # not strictly necessary, but end is idempotent, and user may forget.
             except BaseException as e:
-                # --- Always record first ---
                 encountered_exception = True
-                fr.errors.append(f"{type(e).__name__}: {e}")
+
+                is_supp = settings.is_suppressed(e)
+                fr.errors.append(exception_summary(e))
+
                 if settings.store_traceback:
                     tb = "".join(
                         traceback.format_exception(type(e), e, e.__traceback__, limit=settings.traceback_limit)
                     )
                     if tb:
                         fr.metadata["traceback"] = tb
-                fr.fail("Unhandled exception while processing file")
 
-                # --- Decide raising via settings helpers ---
+                fr.fail(
+                    "Handled exception (suppressed)" if is_supp else "Unhandled exception while processing file"
+                )
+
                 if settings.should_raise(e):
                     raise
                 if (msg := settings.suppression_breadcrumb(e)):
                     fr.warnings.append(msg)
+
             finally:
                 # Persist diagnostics
                 if stdout_buf is not None:
