@@ -1140,8 +1140,10 @@ class FileReport(ReportBase):
         self._recompute_percent()
         # roll-up HITL review if you added ReviewFlag earlier
         if step.review.flagged and not self.review.flagged:
-            self.review = ReviewFlag(flagged=True,
-                                     reason=step.review.reason or f"Step '{step.id}' requested review")
+            self.review = ReviewFlag(
+                flagged=True,
+                reason=step.review.reason or f"Step '{step.id}' requested review"
+            )
         return self
 
     @classmethod
@@ -1873,13 +1875,14 @@ def pipeline_file(
                             fr.warnings.append(f"save failed: {save_err!r}")
 
 
-
 @contextmanager
 def file_step(
     file_report: FileReport,
     label: str,
     *,
     id: str | None = None,
+    step_save_to: Path | str | None = None,
+    pipeline_save_to: Path | str | None = None,
     **other_options,
 ):
     """
@@ -1915,30 +1918,32 @@ def file_step(
 
             try:
                 yield st
-                st.end() # fallback in case user forgets.
 
             except BaseException as e:
                 encountered_exception = True
-                exc_type_name = type(e).__name__
 
-                st.errors.append(f"{exc_type_name}: {e}")
+                is_supp = settings.is_suppressed(e)
+                st.errors.append(exception_summary(e))  # same helper used by pipeline_file
 
                 if settings.store_traceback:
                     tb = "".join(
                         traceback.format_exception(
-                            type(e), e, e.__traceback__,
-                            limit=settings.traceback_limit,
+                            type(e), e, e.__traceback__, limit=settings.traceback_limit
                         )
                     )
                     if tb:
                         st.metadata["traceback"] = tb
 
-                st.fail(f"Unhandled {exc_type_name} in file step")
+                st.fail(
+                    "Handled exception (suppressed)"
+                    if is_supp
+                    else "Unhandled exception while running file step"
+                )
 
                 if settings.should_raise(e):
                     raise
 
-                if msg := settings.suppression_breadcrumb(e):
+                if (msg := settings.suppression_breadcrumb(e)):
                     st.warnings.append(msg)
 
             finally:
@@ -1956,26 +1961,43 @@ def file_step(
                 # enforces id uniqueness, updates timestamps, etc.
                 file_report.append_step(st)
 
-                # Auto-save via owning pipeline, if available
-                if encountered_exception and settings.save_on_exception:
-                    pipeline = getattr(file_report, "pipeline", None)
-                    if pipeline is not None:
-                        try:
-                            save_path = (
-                                settings.exception_save_path_override
-                                or pipeline.output_path
-                            )
-                            if save_path:
-                                pipeline.save(save_path)
-                            else:
-                                st.warnings.append(
-                                    "auto-save skipped: no pipeline output path configured"
-                                )
-                        except Exception as save_err:
-                            st.warnings.append(f"save failed: {save_err!r}")
-                    else:
-                        # Invariant *should* be: file_report is always tied to a pipeline.
-                        # But this keeps the behavior graceful if that’s ever relaxed.
-                        st.warnings.append(
-                            "auto-save skipped: file_report not attached to a pipeline"
+                # Step snapshot AFTER append_step finalization
+                if step_save_to is not None:
+                    try:
+                        atomic_write_json(
+                            Path(step_save_to),
+                            st.model_dump(mode="json"),
+                            indent=2,
+                            encoding="utf-8",
                         )
+                    except Exception as save_err:
+                        st.warnings.append(f"step report save failed: {save_err!r}")
+
+                # Additional copy (Option B)
+                if file_report._pipeline is not None and pipeline_save_to is not None:
+                    try:
+                        file_report._pipeline.save(pipeline_save_to)
+                    except Exception as save_err:
+                        st.warnings.append(f"pipeline save_to failed: {save_err!r}")
+
+                # Canonical autosave (every exit)
+                if file_report._pipeline is not None and file_report._pipeline.output_path is not None:
+                    try:
+                        file_report._pipeline.save(file_report._pipeline.output_path)
+                    except Exception as save_err:
+                        st.warnings.append(f"pipeline autosave failed: {save_err!r}")
+
+                # Best-effort save-on-exception to override path only (distinct)
+                if (
+                    encountered_exception
+                    and settings.save_on_exception
+                    and file_report._pipeline is not None
+                    and settings.exception_save_path_override is not None
+                    and (file_report._pipeline.output_path is None
+                         or Path(settings.exception_save_path_override)\
+                         != Path(file_report._pipeline.output_path))
+                ):
+                    try:
+                        file_report._pipeline.save(settings.exception_save_path_override)
+                    except Exception as save_err:
+                        st.warnings.append(f"save-on-exception failed: {save_err!r}")
