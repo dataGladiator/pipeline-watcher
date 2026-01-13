@@ -15,8 +15,7 @@ from pipeline_watcher import PipelineReport  # adjust import as needed
 
 def load_pipeline_report(path: Path | str) -> PipelineReport:
     """
-    Temporary, strict-ish loader.
-    You said you've changed it to this; keeping it verbatim for now.
+    Temporary, strict-ish loader..
     """
     text = Path(path).read_text(encoding="utf-8")
     data = json.loads(text)
@@ -40,11 +39,11 @@ def count_files_and_steps(report: PipelineReport) -> tuple[int, int]:
 # ------------------------
 
 # Each row is a dict; possible keys:
-#   type, parent, id, name, label, status, succeeded, ms, review
+#   type, parent, id, name, label, status, warnings, ms, review
 
 def _status_str(obj: Any) -> str:
     status = getattr(obj, "status", None)
-    if hasattr(status, "name"):
+    if status is not None and hasattr(status, "name"):
         return status.name
     return str(status) if status is not None else ""
 
@@ -100,7 +99,7 @@ def build_rows(report: PipelineReport) -> List[Dict[str, str]]:
       - name:        file name or pipeline kind
       - label:       step label
       - status:      Status enum name/string
-      - succeeded:   "True"/"False"
+      - warnings:    list of warnings
       - ms:          duration in milliseconds (string)
       - review:      HITL review info, if any
     """
@@ -115,7 +114,7 @@ def build_rows(report: PipelineReport) -> List[Dict[str, str]]:
             "name": report.label or report.kind or "pipeline",
             "label": st.label or "",
             "status": _status_str(st),
-            "succeeded": str(st.succeeded),
+            "warnings": str(st.warnings),
             "ms": _duration_ms_str(st),
             "review": _step_review_str(st),
         })
@@ -132,7 +131,7 @@ def build_rows(report: PipelineReport) -> List[Dict[str, str]]:
             "name": fname,
             "label": f.label,
             "status": _status_str(f),
-            "succeeded": str(f.succeeded),
+            "warnings": str(f.warnings),
             "ms": _duration_ms_str(f),
             "review": _file_review_str(f),
         })
@@ -146,7 +145,7 @@ def build_rows(report: PipelineReport) -> List[Dict[str, str]]:
                 "name": fname,
                 "label": st.label or "",
                 "status": _status_str(st),
-                "succeeded": str(st.succeeded),
+                "warnings": str(st.warnings),
                 "ms": _duration_ms_str(st),
                 "review": _step_review_str(st),
             })
@@ -229,7 +228,7 @@ COLUMN_HEADERS = {
     "name": "Name",
     "label": "Label",
     "status": "Status",
-    "succeeded": "Succeeded",
+    "warnings": "Warnings",
     "ms": "ms",
     "review": "Review",
 }
@@ -351,7 +350,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if not selected_cols:
         # Default columns when no --show-* flags are used
-        selected_cols = ["type", "name", "label", "status", "succeeded"]
+        selected_cols = ["type", "name", "label", "status", "warnings"]
 
     rows = build_rows(report)
     print_table(rows, selected_cols)
