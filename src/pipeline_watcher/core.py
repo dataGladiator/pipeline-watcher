@@ -21,7 +21,14 @@ from dataclasses import fields
 import mimetypes
 
 # third party import
-from pydantic import BaseModel, Field, computed_field, model_validator, field_validator, PrivateAttr
+from pydantic import (
+    BaseModel,
+    Field,
+    computed_field,
+    model_validator,
+    field_validator,
+    PrivateAttr
+)
 
 
 # local imports
@@ -247,6 +254,7 @@ class PipelineReport(BaseModel):
     message: str = ""
     updated_at: datetime = Field(default_factory=_now)
     report_version: str = SCHEMA_VERSION
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     steps: List[StepReport] = Field(default_factory=list)
     files: List[FileReport] = Field(default_factory=list)
 
