@@ -32,9 +32,9 @@ Key Features
 
 - **HITL review flags** for ambiguous or low-confidence outputs
 
-- **Robust serialization** handled via Pydantic’s `model_dump_json()`
+- **Robust serialization** handled via Pydantic
 
-- **Zero non-standard dependencies** (Pydantic + standard library only)
+- **Minimal dependencies** (Pydantic + standard library only)
 
 - **pipeline-watcher-site**: optional companion for turning logs into navigable HTML
 
@@ -66,16 +66,7 @@ Key Features
     - [Use with PipelineReport](#use-with-pipelinereport)
     - [FileReport Summary](#filereport-summary)
   
-  - [StepReport](#stepreport)
-    
-    - [Recording steps inside a file](#recording-steps-inside-a-file)
-    - [Failure behavior](#failure-behavior)
-
 - [Code Structure](#code-structure)
-
-- [HITL Review](#hitl-review)
-
-- [Installation](#installation)
 
 ---
 
@@ -95,7 +86,7 @@ This example shows:
 
 ```python
 from pathlib import Path
-from user_lib import extract_text, index_text # user provided demo 
+from user_lib import extract_text  # user provided demo
 from pipeline_watcher import PipelineReport, pipeline_file, file_step
 
 report = PipelineReport(label="OCR of pdfs",
@@ -106,7 +97,7 @@ for file_path in Path("inputs/pdfs").glob("*.pdf"):
 
     # The context manager handles exceptions and auto-finalizes logs
     with pipeline_file(report, file_path) as file_report:
-        with file_step(file_report, "extract_text", label="Extract text (OCR)") as step:
+        with file_step(file_report, "Extract text (OCR)", id="extract_text") as step:
             extracted_text = extract_text(file_path) # user provided function
             step.notes.append("Performed OCR on the PDF")
             step.metadata["ocr_quality"] = extracted_text.quality
@@ -118,21 +109,21 @@ for file_path in Path("inputs/pdfs").glob("*.pdf"):
                 step.notes.append("OCR quality meets threshold")
             # continue processing file ...
 
-# Persist the whole batch report (direct write to output_path)
+# Persist the whole pipeline report atomically to output_path
 report.save()
 ```
 
-Yields `reports/progress.json` with a batch banner and per-file timelines.
+Yields `reports/progress.json` with a pipeline banner and per-file timelines.
 
 ---
 
 ## Features
 
-### **Batch → File → Step hierarchy**
+### **Pipeline → File → Step hierarchy**
 
 `pipeline-watcher` organizes all logs into a strict, type-checked tree:
 
-- **BatchReport** – high-level banner for an entire run
+- **PipelineReport** – high-level banner for an entire run
 
 - **FileReport** – record associated with a single input file
 
@@ -160,13 +151,13 @@ Any step may request review by adding a *review step*, including:
 
 - metadata (confidence, heuristics, exceptions)
 
-- mark as required / optional
+- a `review.flagged` marker
 
-- success or failure indicators
+- success, failure, or skipped lifecycle status
 
 ### **Thread-Safe Global State**
 
-Settings such as `current_report` use `contextvars` to ensure:
+Bound pipeline state and watcher settings use `contextvars` to ensure:
 
 - safety in async environments
 
@@ -176,7 +167,7 @@ Settings such as `current_report` use `contextvars` to ensure:
 
 ### **Serialization**
 
-Serialization is handled internally by Pydantic. All you have to do is call save on the a PipelineReport instance.
+Serialization is handled internally by Pydantic. All you have to do is call `save()` on a `PipelineReport` instance.
 
 ## Quick Start
 
@@ -200,7 +191,7 @@ report = PipelineReport(label="ocr-report",
                         output_path=logs_dir / "progress.json")
 ```
 
-`output_path` may be omitted, but providing one is **strongly recommended**, even for dry runs—especially if you intend to use context managers, since pipeline-watcher will autosave on exceptions.
+`output_path` may be omitted, but providing one is **strongly recommended**, even for dry runs. When it is set, `pipeline_file()` and `file_step()` autosave the pipeline report on every block exit.
 
 #### Use a context manager
 
@@ -225,21 +216,23 @@ Under default settings, pipeline-watcher will:
 
 - **Insert the file report** into `report.files`
 
-- **Autosave the pipeline report** to `output_path` (or to the override configured in `WatcherSettings`or passed to `pipeline_file`).
+- **Autosave the pipeline report** to `output_path`. If configured, exception-only copies can also be written to `exception_save_path_override`, and explicit snapshots can be written with `pipeline_save_to` or `file_save_to`.
 
 #### Set progress and save
 
 ```python
-from pipeline_watcher import PipelineReport
+from pipeline_watcher import PipelineReport, pipeline_file
+from pathlib import Path
+
 report = PipelineReport(label="ocr-report",
                         output_path=logs_dir / "progress.json")
 
 report.set_progress("initialization", 0)
-files = [file_path in Path("/path/to/pdfs").rglob(f"*.pdf") if file_path.is_file()]
+files = [file_path for file_path in Path("/path/to/pdfs").rglob("*.pdf") if file_path.is_file()]
 n_files = len(files)
 for j, file_path in enumerate(files):
     with pipeline_file(report, file_path) as file_report:
-        report.set_progress("loading file {file_path.stem}", j // n_files)
+        report.set_progress(f"loading {file_path.stem}", int(100 * j / max(n_files, 1)))
         # process files...
 ...
 report.save()
@@ -294,6 +287,9 @@ A few additional settings that might be of interest (see documentation for compl
 # Exception behavior
 raise_on_exception: bool = False
 store_traceback: bool = True
+traceback_limit: Optional[int] = None
+capture_streams: bool = False
+capture_warnings: bool = True
 
 # Routing policy
 suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
@@ -302,6 +298,7 @@ fatal_exceptions: Tuple[Type[BaseException], ...] = (KeyboardInterrupt, SystemEx
 # Persistence policy
 save_on_exception: bool = True
 exception_save_path_override: Optional[str] = None
+min_seconds_between_exception_saves: float = 0.0
 ```
 
 ## FileReport
@@ -326,7 +323,7 @@ All you need to create one is a filesystem path — no additional ceremony.
 ```python
 from pipeline_watcher import FileReport
 
-fp = FileReport("/path/to/some/file")
+fp = FileReport.begin("/path/to/some/file")
 
 fp.note("Here is a note about this file")
 assert fp.running          # passes
@@ -368,7 +365,7 @@ fp = FileReport.begin("/tmp/some.pdf")
 
 # ... your processing logic ...
 fp.add_completed_step("Initial validation")
-fp.add_warning("Low resolution detected")
+fp.warn("Low resolution detected")
 
 if not fp.ok:
     fp.fail("One or more checks failed")
@@ -396,7 +393,7 @@ This is the recommended way to use `FileReport` in real pipelines, since it capt
 - exceptions + traceback
 - duration
 - banner updates
-- autosave-on-exception behavior (based on settings)
+- autosave behavior when attached to a `PipelineReport` with `output_path`
 
 ---
 
@@ -440,10 +437,10 @@ Represents processing for a single file (ordered list of `StepReport`s).
 
 To log progress with minimal ceremony:
 
-- `add_completed_step(label, note=None, metadata=None)` – add a SUCCESS step.
+- `add_completed_step(label, note=None, metadata=None)` – add a SUCCEEDED step.
 - `add_failed_step(label, reason=None, metadata=None)` – add a FAILED step.
 - `add_skipped_step(label, reason=None, metadata=None)` – add a SKIPPED step.
-- `add_review_step(label, reason=None, metadata=None, mark_success=True)` – SUCCESS + HITL request.
+- `add_review_step(label, reason=None, metadata=None, mark_success=True)` – SUCCEEDED + HITL request by default.
 
 ```python
 fr = FileReport.begin(file_id="42", path="inputs/doc1.docx")
@@ -460,7 +457,7 @@ Use `StepReport.notes` as **comments that ship to the UI**. This turns what you�
 normally write as `# comments` into a reviewable narrative.
 
 ```python
-st = StepReport.begin("calc_result", label="Calculate result")
+st = StepReport.begin("Calculate result", id="calc_result")
 result = some_calculation()
 
 if result > 100:
@@ -468,7 +465,7 @@ if result > 100:
 else:
     st.notes.append("result ≤ 100 → taking branch B")
 
-st.end()  # infers SUCCESS (no failed checks or errors)
+st.end()  # infers SUCCEEDED (no failed checks or errors)
 ```
 
 Tip: add ergonomic helpers to avoid touching lists directly:
@@ -490,12 +487,12 @@ Context managers simplify the *try/except/finally* ceremony and guarantee that s
 and files are finalized, even on early returns or errors. They also record `duration_ms`
 for quick SLO/troubleshooting.
 
-### `pipeline_step` (batch-level step)
+### `pipeline_step` (pipeline-level step)
 
 ```python
 from pipeline_watcher import pipeline_step
 
-with pipeline_step(report, "validate", label="Validate batch") as st:
+with pipeline_step(report, "Validate batch", id="validate") as st:
     st.add_check("manifest_present", ok=True)
     st.add_check("ids_unique", ok=False, detail="3 duplicates")  # will cause FAILED
 # The step is appended, finalized, and timed automatically.
@@ -508,14 +505,13 @@ from pipeline_watcher import pipeline_file
 
 with pipeline_file(
     report,
-    file_id="f1",
     path="inputs/a.docx",
-    name="a.docx",
+    file_id="f1",
     raise_on_exception=False,   # record failure and continue (default)
-    save_on_exception=True      # save report immediately on errors
+    save_on_exception=True      # save exception copy when configured
 ) as fr:
     fr.add_completed_step("Verified file exists")
-    risky_work()  # if this raises, fr is recorded as FAILED and report is saved
+    risky_work()  # if this raises, fr is recorded as FAILED
 ```
 
 ### `file_step` (per-step inside a file)
@@ -523,8 +519,8 @@ with pipeline_file(
 ```python
 from pipeline_watcher import file_step
 
-with pipeline_file(report, file_id="f2", path="inputs/b.csv", name="b.csv") as fr:
-    with file_step(fr, "calc_result", label="Calculate result") as st:
+with pipeline_file(report, "inputs/b.csv", file_id="f2") as fr:
+    with file_step(fr, "Calculate result", id="calc_result") as st:
         r = some_calculation()
         st.notes.append(f"raw result={r}")
         if r > 100:
@@ -538,18 +534,21 @@ with pipeline_file(report, file_id="f2", path="inputs/b.csv", name="b.csv") as f
 All context managers support exception handling: they **record** the failure (status, error,
 traceback), **finalize** the object, and by default **do not re-raise**—so your pipeline
 can continue to the next file/step. You can opt into fail-fast with `raise_on_exception=True`.
-`pipeline_step`/`pipeline_file` also support **saving on exception** via `save_on_exception`
-and `output_path`/`output_path_override`.
+`pipeline_file` and `file_step` autosave the pipeline to `output_path` on every exit when
+the file is attached to a pipeline. Exception-only copies use
+`exception_save_path_override`, while explicit snapshots can be written with
+`pipeline_save_to`, `file_save_to`, or `step_save_to`.
 
 ### Binding (less boilerplate)
 
 Bind a report once so helpers don’t need the `report` parameter:
 
 ```python
-from pipeline_watcher import bind_pipeline
+from pipeline_watcher import pipeline_file
+from pipeline_watcher.core import bind_pipeline
 
 with bind_pipeline(report):
-    with pipeline_file(None, file_id="f2", path="inputs/b.docx") as fr:
+    with pipeline_file(None, "inputs/b.docx", file_id="f2") as fr:
         # Any nested helpers can discover the bound pipeline
         ...
 ```
@@ -573,7 +572,7 @@ templates/
 Example snippet:
 
 ```jinja2
-<h1>Batch {{ report.batch_id }} — {{ report.stage }}</h1>
+<h1>Pipeline {{ report.label }} — {{ report.stage }}</h1>
 <p>Status: {{ report.percent }}% — {{ report.message }}</p>
 
 <ul>
@@ -626,14 +625,14 @@ Pydantic will do the heavy lifting for nested models and enums.
 
 ## Persistence
 
-- JSON-friendly: `model_dump_json()` on any report.
-- Helper: `dump_report(path, report)` or `PipelineReport.save(output_path)` (direct write).
+- JSON-friendly: use Pydantic serialization (`model_dump()` / `model_dump_json()`) on any report.
+- Atomic helpers: `dump_report(path, report)` or `PipelineReport.save(output_path)`.
 
 ```python
 from pipeline_watcher import dump_report
 
 dump_report("reports/progress.json", report)  # atomic helper
-# or, if you prefer a direct write on the object:
+# or save atomically from the object:
 report.output_path = "reports/progress.json"
 report.save()
 ```
