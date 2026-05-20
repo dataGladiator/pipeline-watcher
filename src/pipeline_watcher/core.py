@@ -1313,6 +1313,8 @@ class FileReport(ReportBase):
     @field_validator("path", mode="before")
     @classmethod
     def _coerce_path(cls, v) -> Path:
+        if isinstance(v, str) and v == "":
+            raise ValueError("path cannot be empty")
         if isinstance(v, (str, Path)):
             p = Path(v)
             if str(p) == "":
