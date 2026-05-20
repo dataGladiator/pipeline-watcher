@@ -73,10 +73,6 @@ def _dedupe_exception_types(
     return tuple(out)
 
 
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, Type
-
-
 @dataclass(frozen=True)
 class WatcherSettings:
     """
@@ -259,14 +255,19 @@ def _normalize_settings_overrides(overrides: dict) -> dict:
     overrides = dict(overrides)
 
     if "fatal_exceptions" in overrides:
-        overrides["_pipeline_fatal_exceptions"] = _normalize_exception_types(
+        overrides["pipeline_fatal_exceptions"] = _normalize_exception_types(
             overrides.pop("fatal_exceptions") or ()
         )
 
-    if "_system_fatal_exceptions" in overrides:
-        overrides["_system_fatal_exceptions"] = _normalize_exception_types(
-            overrides["_system_fatal_exceptions"] or ()
-        )
+    for key in (
+        "suppressed_exceptions",
+        "pipeline_fatal_exceptions",
+        "_system_fatal_exceptions",
+    ):
+        if key in overrides:
+            overrides[key] = _normalize_exception_types(
+                overrides[key] or ()
+            )
 
     unknown = set(overrides) - _SETTINGS_FIELD_NAMES
     if unknown:
@@ -347,7 +348,7 @@ class use_settings:
     """
 
     def __init__(self, **overrides):
-        self._overrides = overrides
+        self._overrides = _normalize_settings_overrides(overrides)
         self._token: Optional[Token] = None
         self._effective: Optional[WatcherSettings] = None
 
@@ -398,6 +399,7 @@ def with_overrides(base: WatcherSettings, **overrides) -> WatcherSettings:
 
         eff_for_step = with_overrides(current_settings(), traceback_limit=25)
     """
+    overrides = _normalize_settings_overrides(overrides)
     return replace(base, **overrides)
 
 
@@ -414,6 +416,7 @@ def set_global_settings(**overrides) -> WatcherSettings:
     - Not suitable for libraries and concurrent pipelines.
     """
     global _default_settings
+    overrides = _normalize_settings_overrides(overrides)
     new = replace(_default_settings, **overrides)
     _default_settings = new
     _settings_var.set(new)

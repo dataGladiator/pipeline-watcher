@@ -1566,7 +1566,9 @@ def bind_pipeline(pr: "PipelineReport"):
         _current_pipeline_report.reset(token)
 
 
-_SETTINGS_KEYS: set[str] = {f.name for f in fields(WatcherSettings)}
+_SETTINGS_KEYS: set[str] = {f.name for f in fields(WatcherSettings)} | {
+    "fatal_exceptions",
+}
 
 
 @contextmanager
