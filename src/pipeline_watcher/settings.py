@@ -73,8 +73,65 @@ def _dedupe_exception_types(
     return tuple(out)
 
 
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Type
+
+
 @dataclass(frozen=True)
 class WatcherSettings:
+    """
+    Immutable settings controlling watcher behavior.
+
+    These flags determine how exceptions are routed, what incident data is
+    captured (tracebacks, I/O streams, warnings), and whether the pipeline
+    should be persisted immediately after an exception. Instances are intended
+    to be **read-only** and layered via context overrides.
+
+    Parameters
+    ----------
+    raise_on_exception : bool, default False
+        If ``True``, re-raise exceptions not listed in suppressed_exceptions.
+        If ``False``, catch exceptions not listed in fatal_exceptions.
+    store_traceback : bool, default True
+        If ``True``, attach a formatted traceback string to metadata when
+        exceptions occur.
+    traceback_limit : int or None, default None
+        If set, limit the traceback to the last ``N`` frames. ``None`` keeps
+        the full traceback.
+    capture_streams : bool, default False
+        If ``True``, capture ``stdout`` and ``stderr`` during watched blocks,
+        storing them in metadata for UI inspection.
+    capture_warnings : bool, default True
+        If ``True``, capture Python warnings emitted during watched blocks.
+    suppressed_exceptions : tuple of Exception types or None, default None
+        Exceptions that do not raise when ``raise_on_exception=True``.
+        These are always recorded.
+    pipeline_fatal_exceptions : tuple of Exception types, default ()
+        User/project-level fatal exceptions. These are added to system fatal
+        exceptions.
+    _system_fatal_exceptions : tuple of Exception types
+        System fatal exceptions. Defaults should usually preserve
+        ``KeyboardInterrupt`` and ``SystemExit`` behavior.
+
+    save_on_exception : bool, default True
+        If ``True``, attempt to persist the pipeline report immediately on
+        exception. Best-effort.
+    exception_save_path_override : str or None, default None
+        If provided, use this path instead of a pipeline's default output path
+        when saving on exception.
+    min_seconds_between_exception_saves : float, default 0.0
+        Minimum time in seconds between successive auto-saves triggered by
+        exceptions. ``0`` disables throttling.
+
+    Notes
+    -----
+    - Fatal exceptions always raise.
+    - Suppressed exceptions only suppress raising when ``raise_on_exception``
+      is ``True``.
+    - Prefer layering settings with ``use_settings`` or ``with_overrides``
+      rather than mutating state.
+    """
+
     # Exception behavior
     raise_on_exception: bool = False
     store_traceback: bool = True
@@ -107,6 +164,7 @@ class WatcherSettings:
         Effective fatal exceptions.
 
         Includes system fatal exceptions plus project/pipeline fatal exceptions.
+        Fatal exceptions are always raised and never suppressed.
         """
         return _dedupe_exception_types(
             self._system_fatal_exceptions,
@@ -114,18 +172,41 @@ class WatcherSettings:
         )
 
     def is_fatal(self, e: BaseException) -> bool:
-        return isinstance(e, self.fatal_exceptions)
+        """True if e must always be raised, ignoring raise_on_exception."""
+        fx = self.fatal_exceptions
+        return bool(fx) and isinstance(e, fx)
 
     def is_suppressed(self, e: BaseException) -> bool:
+        """True if e is allowed to not raise when raise_on_exception=True."""
         sx = self.suppressed_exceptions
         return bool(sx) and isinstance(e, sx)
 
     def should_raise(self, e: BaseException) -> bool:
+        """
+        Decide whether to raise e according to the routing policy:
+
+        1) Fatal exceptions always raise.
+        2) If raise_on_exception is True, raise unless e is suppressed.
+        3) Otherwise, do not raise, but still record.
+        """
         if self.is_fatal(e):
             return True
         if self.raise_on_exception and not self.is_suppressed(e):
             return True
         return False
+
+    def suppression_breadcrumb(self, e: BaseException) -> Optional[str]:
+        """
+        Optional message explaining why an exception was not raised.
+
+        Returned only when raise_on_exception=True and e was suppressed.
+        """
+        if self.raise_on_exception and self.is_suppressed(e):
+            return (
+                f"suppressed raise_on_exception for {type(e).__name__} "
+                "via suppressed_exceptions"
+            )
+        return None
 
 __all__ = [
     "WatcherSettings",
