@@ -41,9 +41,91 @@ Creating a derived settings object (without changing context)::
 """
 from __future__ import annotations
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, replace
-from typing import Optional, Tuple, Type
+from dataclasses import dataclass, field, fields, replace
+from typing import Iterable, Optional, Tuple, Type
 
+
+_SYSTEM_FATAL_EXCEPTIONS: Tuple[Type[BaseException], ...] = (
+    KeyboardInterrupt,
+    SystemExit,
+)
+
+
+def _dedupe_exception_types(
+    *groups: Optional[Tuple[Type[BaseException], ...]],
+) -> Tuple[Type[BaseException], ...]:
+    out: list[Type[BaseException]] = []
+
+    for group in groups:
+        if not group:
+            continue
+
+        for exc in group:
+            if not isinstance(exc, type) or not issubclass(exc, BaseException):
+                raise TypeError(
+                    "Expected exception classes subclassing BaseException, "
+                    f"got {exc!r}"
+                )
+
+            if exc not in out:
+                out.append(exc)
+
+    return tuple(out)
+
+
+@dataclass(frozen=True)
+class WatcherSettings:
+    # Exception behavior
+    raise_on_exception: bool = False
+    store_traceback: bool = True
+    traceback_limit: Optional[int] = None
+    capture_streams: bool = False
+    capture_warnings: bool = True
+
+    # Routing policy
+    suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
+
+    # User/project fatal exceptions.
+    # These are added to _system_fatal_exceptions.
+    pipeline_fatal_exceptions: Tuple[Type[BaseException], ...] = ()
+
+    # System fatal exceptions.
+    # Override only if you intentionally want to change interrupt/exit behavior.
+    _system_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
+        default=_SYSTEM_FATAL_EXCEPTIONS,
+        repr=False,
+    )
+
+    # Persistence policy
+    save_on_exception: bool = True
+    exception_save_path_override: Optional[str] = None
+    min_seconds_between_exception_saves: float = 0.0
+
+    @property
+    def fatal_exceptions(self) -> Tuple[Type[BaseException], ...]:
+        """
+        Effective fatal exceptions.
+
+        Includes system fatal exceptions plus project/pipeline fatal exceptions.
+        """
+        return _dedupe_exception_types(
+            self._system_fatal_exceptions,
+            self.pipeline_fatal_exceptions,
+        )
+
+    def is_fatal(self, e: BaseException) -> bool:
+        return isinstance(e, self.fatal_exceptions)
+
+    def is_suppressed(self, e: BaseException) -> bool:
+        sx = self.suppressed_exceptions
+        return bool(sx) and isinstance(e, sx)
+
+    def should_raise(self, e: BaseException) -> bool:
+        if self.is_fatal(e):
+            return True
+        if self.raise_on_exception and not self.is_suppressed(e):
+            return True
+        return False
 
 __all__ = [
     "WatcherSettings",
@@ -54,55 +136,68 @@ __all__ = [
 ]
 
 
+def _normalize_exception_types(
+    value: (
+        None
+        | Type[BaseException]
+        | Iterable[Type[BaseException]]
+    ),
+) -> tuple[Type[BaseException], ...]:
+    """
+    Normalize exception type settings into a validated tuple.
+
+    Accepts:
+    - None
+    - a single exception class
+    - an iterable of exception classes
+    """
+    if value is None:
+        return ()
+
+    if isinstance(value, type) and issubclass(value, BaseException):
+        candidates = (value,)
+    else:
+        candidates = tuple(value)
+
+    out: list[Type[BaseException]] = []
+
+    for exc in candidates:
+        if not isinstance(exc, type) or not issubclass(exc, BaseException):
+            raise TypeError(
+                "Expected exception classes subclassing BaseException, "
+                f"got {exc!r}"
+            )
+
+        if exc not in out:
+            out.append(exc)
+
+    return tuple(out)
+
+
+def _normalize_settings_overrides(overrides: dict) -> dict:
+    overrides = dict(overrides)
+
+    if "fatal_exceptions" in overrides:
+        overrides["_pipeline_fatal_exceptions"] = _normalize_exception_types(
+            overrides.pop("fatal_exceptions") or ()
+        )
+
+    if "_system_fatal_exceptions" in overrides:
+        overrides["_system_fatal_exceptions"] = _normalize_exception_types(
+            overrides["_system_fatal_exceptions"] or ()
+        )
+
+    unknown = set(overrides) - _SETTINGS_FIELD_NAMES
+    if unknown:
+        raise TypeError(
+            f"Unknown WatcherSettings override(s): {sorted(unknown)}"
+        )
+
+    return overrides
+
+
 @dataclass(frozen=True)
 class WatcherSettings:
-    """
-    Immutable settings controlling watcher behavior.
-
-    These flags determine how exceptions are routed, what incident data is
-    captured (tracebacks, I/O streams, warnings), and whether the pipeline
-    should be persisted immediately after an exception. Instances are intended
-    to be **read-only** and layered via context overrides.
-
-    Parameters
-    ----------
-    raise_on_exception : bool, default False
-        If ``True``, re-raise exceptions not listed in suppressed_exceptions.
-        If ``False``, catch exceptions not listed in fatal_exceptions.
-    store_traceback : bool, default True
-        If ``True``, attach a formatted traceback string to metadata when
-        exceptions occur.
-    traceback_limit : int or None, default None
-        If set, limit the traceback to the last ``N`` frames. ``None`` keeps
-        the full traceback.
-    capture_streams : bool, default False
-        If ``True``, capture ``stdout`` and ``stderr`` during watched blocks,
-        storing them in metadata for UI inspection.
-    capture_warnings : bool, default True
-        If ``True``, capture Python warnings emitted during watched blocks.
-    suppressed_exceptions : tuple of Exception types or None, default None
-        Exceptions that do not raise when `raise_on_exception=True` (always recorded).
-    fatal_exceptions : tuple of Exception types, default (KeyboardInterrupt, SystemExit)
-        Exceptions that are always raised (never suppressed).
-
-    save_on_exception : bool, default True
-        If ``True``, attempt to persist the pipeline report immediately on
-        exception (best-effort).
-    exception_save_path_override : str or None, default None
-        If provided, use this path instead of a pipeline's default output path
-        when saving on exception.
-    min_seconds_between_exception_saves : float, default 0.0
-        Minimum time (seconds) between successive auto-saves triggered by
-        exceptions. ``0`` disables throttling.
-
-    Notes
-    -----
-    - The watcher treats :class:`KeyboardInterrupt` and :class:`SystemExit`
-      as non-swallowable by default via :attr:`reraise`.
-    - Prefer layering settings with :class:`use_settings` or
-      :func:`with_overrides` rather than mutating state.
-    """
-
     # Exception behavior
     raise_on_exception: bool = False
     store_traceback: bool = True
@@ -112,45 +207,41 @@ class WatcherSettings:
 
     # Routing policy
     suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
-    fatal_exceptions: Tuple[Type[BaseException], ...] = (KeyboardInterrupt, SystemExit)
+
+    # Internal storage for user/project fatal exceptions.
+    _pipeline_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
+        default=(),
+        repr=False,
+    )
+
+    # Internal system-level fatal exceptions.
+    # Override only in unusual cases.
+    _system_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
+        default=_SYSTEM_FATAL_EXCEPTIONS,
+        repr=False,
+    )
 
     # Persistence policy
     save_on_exception: bool = True
     exception_save_path_override: Optional[str] = None
     min_seconds_between_exception_saves: float = 0.0
 
+    @property
+    def fatal_exceptions(self) -> Tuple[Type[BaseException], ...]:
+        """
+        Effective fatal exceptions.
+
+        Includes system fatal exceptions plus user/project fatal exceptions.
+        """
+        return _dedupe_exception_types(
+            self._system_fatal_exceptions,
+            self._pipeline_fatal_exceptions,
+        )
+
     def is_fatal(self, e: BaseException) -> bool:
-        """True if e must always be raised (ignores raise_on_exception)."""
-        fx = self.fatal_exceptions
-        return bool(fx) and isinstance(e, fx)
+        """True if e must always be raised."""
+        return isinstance(e, self.fatal_exceptions)
 
-    def is_suppressed(self, e: BaseException) -> bool:
-        """True if e is allowed to NOT raise when raise_on_exception=True."""
-        sx = self.suppressed_exceptions
-        return bool(sx) and isinstance(e, sx)
-
-    def should_raise(self, e: BaseException) -> bool:
-        """
-        Decide whether to raise `e` according to the simplified policy:
-
-        1) Fatal exceptions always raise.
-        2) If raise_on_exception is True, raise unless e is suppressed.
-        3) Otherwise, do not raise (but always record).
-        """
-        if self.is_fatal(e):
-            return True
-        if self.raise_on_exception and not self.is_suppressed(e):
-            return True
-        return False
-
-    def suppression_breadcrumb(self, e: BaseException) -> Optional[str]:
-        """
-        Optional message explaining why an exception wasn't raised.
-        Returned only when raise_on_exception=True and e was suppressed.
-        """
-        if self.raise_on_exception and self.is_suppressed(e):
-            return f"suppressed raise_on_exception for {type(e).__name__} via suppressed_exceptions"
-        return None
 
 #: Module-level default settings used when no overrides are active.
 _default_settings = WatcherSettings()
@@ -293,3 +384,8 @@ def set_global_settings(**overrides) -> WatcherSettings:
     _default_settings = new
     _settings_var.set(new)
     return new
+
+
+_SETTINGS_FIELD_NAMES = {f.name for f in fields(WatcherSettings)}
+_VIRTUAL_SETTINGS_KEYS = {"fatal_exceptions"}
+_SETTINGS_KEYS = _SETTINGS_FIELD_NAMES | _VIRTUAL_SETTINGS_KEYS

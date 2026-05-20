@@ -89,9 +89,11 @@ from pathlib import Path
 from user_lib import extract_text  # user provided demo
 from pipeline_watcher import PipelineReport, pipeline_file, file_step
 
-report = PipelineReport(label="OCR of pdfs",
-                        kind="process",
-                        output_path="reports/progress.json")
+report = PipelineReport(
+    label="OCR of pdfs",
+    kind="process",
+    output_path="reports/progress.json"
+)
 
 for file_path in Path("inputs/pdfs").glob("*.pdf"):
 
