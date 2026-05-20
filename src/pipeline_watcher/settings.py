@@ -277,53 +277,6 @@ def _normalize_settings_overrides(overrides: dict) -> dict:
     return overrides
 
 
-@dataclass(frozen=True)
-class WatcherSettings:
-    # Exception behavior
-    raise_on_exception: bool = False
-    store_traceback: bool = True
-    traceback_limit: Optional[int] = None
-    capture_streams: bool = False
-    capture_warnings: bool = True
-
-    # Routing policy
-    suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
-
-    # Internal storage for user/project fatal exceptions.
-    _pipeline_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
-        default=(),
-        repr=False,
-    )
-
-    # Internal system-level fatal exceptions.
-    # Override only in unusual cases.
-    _system_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
-        default=_SYSTEM_FATAL_EXCEPTIONS,
-        repr=False,
-    )
-
-    # Persistence policy
-    save_on_exception: bool = True
-    exception_save_path_override: Optional[str] = None
-    min_seconds_between_exception_saves: float = 0.0
-
-    @property
-    def fatal_exceptions(self) -> Tuple[Type[BaseException], ...]:
-        """
-        Effective fatal exceptions.
-
-        Includes system fatal exceptions plus user/project fatal exceptions.
-        """
-        return _dedupe_exception_types(
-            self._system_fatal_exceptions,
-            self._pipeline_fatal_exceptions,
-        )
-
-    def is_fatal(self, e: BaseException) -> bool:
-        """True if e must always be raised."""
-        return isinstance(e, self.fatal_exceptions)
-
-
 #: Module-level default settings used when no overrides are active.
 _default_settings = WatcherSettings()
 
