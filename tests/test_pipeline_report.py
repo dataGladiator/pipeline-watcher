@@ -292,6 +292,136 @@ def test_status_is_pending_for_nonterminal_pending_units():
     assert report.status is Status.PENDING
 
 
+def test_model_validate_hydrates_json_statuses_to_status_enum_properties():
+    report = PipelineReport(label="process-report")
+    report.append_step(_step("Load inputs", Status.SUCCEEDED))
+
+    file_report = FileReport.begin("outputs/result.json", file_id="result")
+    file_report.append_step(_step("Compute result", Status.FAILED))
+    report.append_file(file_report)
+
+    data = json.loads(json.dumps(report.model_dump(mode="json")))
+    assert type(data["status"]) is str
+    assert type(data["steps"][0]["status"]) is str
+    assert type(data["files"][0]["status"]) is str
+    assert type(data["files"][0]["steps"][0]["status"]) is str
+
+    hydrated = PipelineReport.model_validate(data)
+
+    assert isinstance(hydrated, PipelineReport)
+    assert isinstance(hydrated.steps[0], StepReport)
+    assert isinstance(hydrated.files[0], FileReport)
+    assert isinstance(hydrated.files[0].steps[0], StepReport)
+    assert hydrated.status is Status.FAILED
+    assert hydrated.status.failed
+    assert hydrated.steps[0].status is Status.SUCCEEDED
+    assert hydrated.steps[0].succeeded
+    assert hydrated.files[0].status is Status.FAILED
+    assert hydrated.files[0].failed
+    assert hydrated.files[0].terminal
+    assert hydrated.files[0].steps[0].status is Status.FAILED
+    assert hydrated.files[0].steps[0].status.failed
+    assert hydrated.files[0].steps[0].failed
+
+
+def test_model_validate_json_hydrates_saved_report_json_text(tmp_path: Path):
+    output_path = tmp_path / "reports" / "progress.json"
+    report = PipelineReport(label="process-report", output_path=output_path)
+    report.append_step(_step("Load inputs", Status.SUCCEEDED))
+    report.append_file(_file("result.json", Status.SKIPPED, file_id="result"))
+    report.save()
+
+    hydrated = PipelineReport.model_validate_json(output_path.read_text())
+
+    assert isinstance(hydrated, PipelineReport)
+    assert isinstance(hydrated.steps[0], StepReport)
+    assert isinstance(hydrated.files[0], FileReport)
+    assert hydrated.status is Status.SUCCEEDED
+    assert hydrated.status.succeeded
+    assert hydrated.steps[0].status is Status.SUCCEEDED
+    assert hydrated.steps[0].succeeded
+    assert hydrated.files[0].status is Status.SKIPPED
+    assert hydrated.files[0].skipped
+    assert hydrated.files[0].terminal
+
+
+def test_from_file_hydrates_saved_report_to_report_objects(tmp_path: Path):
+    output_path = tmp_path / "reports" / "progress.json"
+    report = PipelineReport(label="process-report", output_path=output_path)
+    report.append_step(_step("Initialize orchestrator", Status.SUCCEEDED))
+
+    file_report = FileReport.begin("outputs/result.json", file_id="result")
+    file_report.append_step(_step("Load inputs", Status.SUCCEEDED))
+    file_report.append_step(_step("Render output", Status.SKIPPED))
+    report.append_file(file_report)
+    report.save()
+
+    hydrated = PipelineReport.from_file(output_path)
+
+    assert isinstance(hydrated, PipelineReport)
+    assert isinstance(hydrated.steps[0], StepReport)
+    assert isinstance(hydrated.files[0], FileReport)
+    assert isinstance(hydrated.files[0].steps[0], StepReport)
+    assert isinstance(hydrated.files[0].path, Path)
+    assert hydrated.files[0].path == Path("outputs/result.json")
+    assert hydrated.status is Status.SUCCEEDED
+    assert hydrated.status.succeeded
+    assert hydrated.steps[0].succeeded
+    assert hydrated.files[0].status is Status.SUCCEEDED
+    assert hydrated.files[0].succeeded
+    assert hydrated.files[0].steps[0].succeeded
+    assert hydrated.files[0].steps[1].skipped
+
+
+def test_json_hydration_preserves_json_metadata_without_status_coercion():
+    report = PipelineReport(
+        label="process-report",
+        metadata={
+            "status": "metadata status",
+            "nested": {"status": "failed", "values": [1, {"status": "running"}]},
+        },
+    )
+    step = _step("Load inputs", Status.SUCCEEDED)
+    step.metadata["status"] = "step metadata status"
+    file_report = _file("result.json", Status.SUCCEEDED, file_id="result")
+    file_report.metadata["status"] = "file metadata status"
+    file_report.metadata["nested"] = {"status": "skipped"}
+    report.append_step(step)
+    report.append_file(file_report)
+
+    data = json.loads(json.dumps(report.model_dump(mode="json")))
+    hydrated = PipelineReport.model_validate(data)
+
+    assert hydrated.metadata == {
+        "status": "metadata status",
+        "nested": {"status": "failed", "values": [1, {"status": "running"}]},
+    }
+    assert type(hydrated.metadata["status"]) is str
+    assert hydrated.steps[0].metadata == {"status": "step metadata status"}
+    assert type(hydrated.steps[0].metadata["status"]) is str
+    assert hydrated.files[0].metadata == {
+        "status": "file metadata status",
+        "nested": {"status": "skipped"},
+    }
+    assert type(hydrated.files[0].metadata["status"]) is str
+    assert hydrated.files[0].status is Status.SUCCEEDED
+    assert hydrated.files[0].status.succeeded
+
+
+def test_pipeline_status_is_recomputed_when_hydrating_json():
+    report = PipelineReport(label="process-report")
+    report.append_file(_file("result.json", Status.FAILED, file_id="result"))
+
+    data = json.loads(json.dumps(report.model_dump(mode="json")))
+    data["status"] = "succeeded"
+
+    hydrated = PipelineReport.model_validate(data)
+
+    assert hydrated.files[0].status is Status.FAILED
+    assert hydrated.status is Status.FAILED
+    assert hydrated.status.failed
+
+
 def test_table_rows_for_files_map_includes_seen_and_missing_rows():
     report = PipelineReport(label="process-report")
     seen = _file(

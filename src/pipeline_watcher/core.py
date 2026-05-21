@@ -298,6 +298,22 @@ class PipelineReport(BaseModel):
         # Fallback: incomplete
         return Status.PENDING
 
+    @classmethod
+    def from_file(cls, path: Path | str) -> Self:
+        """Hydrate a saved pipeline report JSON artifact.
+
+        Parameters
+        ----------
+        path : pathlib.Path or str
+            Path to a JSON file produced by :meth:`save`.
+
+        Returns
+        -------
+        PipelineReport
+            Hydrated report with nested ``FileReport`` and ``StepReport`` objects.
+        """
+        return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
+
     def add_completed_step(self, label: str, *, id: str | None = None) -> StepReport:
         """Construct, finalize, append, and return a batch-level step. Ensures id uniqueness.
 
@@ -1312,14 +1328,11 @@ class FileReport(ReportBase):
 
     @field_validator("path", mode="before")
     @classmethod
-    def _coerce_path(cls, v) -> Path:
+    def _coerce_path(cls, v):
         if isinstance(v, str) and v == "":
             raise ValueError("path cannot be empty")
         if isinstance(v, (str, Path)):
-            p = Path(v)
-            if str(p) == "":
-                raise ValueError("path cannot be empty")
-            return p
+            return v
         raise TypeError("path must be str or Path")
 
     def _flagged_steps(self) -> List[StepReport]:

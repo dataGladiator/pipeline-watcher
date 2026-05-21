@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -15,11 +14,9 @@ from pipeline_watcher import PipelineReport  # adjust import as needed
 
 def load_pipeline_report(path: Path | str) -> PipelineReport:
     """
-    Temporary, strict-ish loader..
+    Load a saved pipeline report JSON artifact.
     """
-    text = Path(path).read_text(encoding="utf-8")
-    data = json.loads(text)
-    return PipelineReport.model_validate(data)
+    return PipelineReport.from_file(path)
 
 
 # ------------------------

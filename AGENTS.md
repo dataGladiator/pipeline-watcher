@@ -353,6 +353,48 @@ Put supporting values in `step.metadata`.
 
 ---
 
+## 9.1 Check statuses through Status properties
+
+`status` values are `Status` enum instances from `src/pipeline_watcher/core.py`.
+
+When checking lifecycle state, prefer enum-backed properties such as `.pending`, `.running`, `.succeeded`, `.failed`, `.skipped`, and `.terminal`.
+
+Preferred:
+
+```python
+if file_report.status.failed:
+    ...
+
+if step.terminal:
+    ...
+```
+
+Avoid hard-coded string checks in application code:
+
+```python
+if file_report.status == "failed":
+    ...
+```
+
+This also applies when reading saved report JSON, but only after hydrating the raw JSON into a report model.
+
+```python
+report = PipelineReport.from_file(path)
+
+if report.status.failed:
+    ...
+```
+
+Direct Pydantic hydration is also acceptable when the JSON text or decoded data is already available:
+
+```python
+report = PipelineReport.model_validate_json(path.read_text())
+```
+
+Raw `json.loads(...)` dictionaries contain plain strings, so `data["status"].failed` will not work. Hydration restores nested `Status` enum values while preserving JSON-compatible metadata as user data.
+
+---
+
 ## 10. Use exception classes to define failure boundaries
 
 `pipeline-watcher` context managers already record exceptions.
@@ -757,3 +799,4 @@ When modifying code that uses `pipeline-watcher`, follow these rules:
 17. Use `raise_on_exception=True` only when a failed step should stop the current item.
 18. Do not manually duplicate failure recording that the context managers already perform.
 19. Avoid nested report creation unless intentionally creating a separate orchestrator report.
+20. Check lifecycle state with `Status` or report properties such as `.failed`, `.succeeded`, and `.terminal` instead of hard-coded status strings.
