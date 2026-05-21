@@ -1,6 +1,6 @@
 import pytest
 
-from pipeline_watcher import FileReport, PipelineReport, Status, file_step, pipeline_file
+from pipeline_watcher import PipelineReport, Status, file_step, pipeline_file
 from pipeline_watcher import settings as settings_module
 from pipeline_watcher.settings import (
     WatcherSettings,
@@ -69,11 +69,13 @@ def test_fatal_exceptions_override_suppression():
     assert settings.should_raise(ProcessException("stop process"))
 
 
-def test_fatal_exceptions_are_deduped_with_system_defaults():
-    base = current_settings()
-
+def test_pipeline_fatal_exceptions_are_deduped_with_system_defaults():
     with use_settings(
-        fatal_exceptions=(*base.fatal_exceptions, ProcessException),
+        pipeline_fatal_exceptions=(
+            KeyboardInterrupt,
+            ProcessException,
+            ProcessException,
+        ),
     ) as settings:
         fatal_exceptions = settings.fatal_exceptions
 
@@ -110,7 +112,7 @@ def test_with_overrides_returns_new_settings_without_mutating_base():
     derived = with_overrides(
         base,
         raise_on_exception=True,
-        fatal_exceptions=(ProcessException,),
+        pipeline_fatal_exceptions=(ProcessException,),
     )
 
     assert derived is not base
@@ -121,19 +123,33 @@ def test_with_overrides_returns_new_settings_without_mutating_base():
 
 
 def test_set_global_settings_applies_agents_exception_policy_and_is_reset():
-    base = current_settings()
-
     settings = set_global_settings(
-        raise_on_exception=True,
         suppressed_exceptions=(UnitException,),
-        fatal_exceptions=(*base.fatal_exceptions, ProcessException),
+        pipeline_fatal_exceptions=(ProcessException,),
     )
 
     assert current_settings() is settings
-    assert not current_settings().should_raise(UnitException("known fail point"))
+    assert current_settings().is_suppressed(UnitException("known fail point"))
     assert current_settings().should_raise(ProcessException("stop process"))
+    assert current_settings().pipeline_fatal_exceptions == (ProcessException,)
     assert KeyboardInterrupt in current_settings().fatal_exceptions
     assert SystemExit in current_settings().fatal_exceptions
+
+    with use_settings(raise_on_exception=True) as run_settings:
+        assert not run_settings.should_raise(UnitException("known fail point"))
+        assert run_settings.should_raise(ValueError("ordinary failure"))
+
+
+def test_fatal_exceptions_alias_remains_supported_for_compatibility():
+    settings = set_global_settings(
+        suppressed_exceptions=(UnitException,),
+        fatal_exceptions=(ProcessException,),
+    )
+
+    assert settings.pipeline_fatal_exceptions == (ProcessException,)
+    assert settings.should_raise(ProcessException("stop process"))
+    assert KeyboardInterrupt in settings.fatal_exceptions
+    assert SystemExit in settings.fatal_exceptions
 
 
 @pytest.mark.parametrize(
@@ -159,28 +175,38 @@ def test_invalid_exception_policy_values_are_rejected(override):
 
 def test_context_managers_inherit_agents_exception_policy():
     report = PipelineReport(label="process-report")
-    file_report = FileReport.begin("outputs/result.json", file_id="result")
 
     with use_settings(
-        raise_on_exception=True,
         suppressed_exceptions=(UnitException,),
-        fatal_exceptions=(ProcessException,),
+        pipeline_fatal_exceptions=(ProcessException,),
     ):
-        with file_step(file_report, "Compute result"):
-            raise UnitException("known fail point")
+        with pipeline_file(report, "outputs/unit-result.json", file_id="unit-result") as file_report:
+            with file_step(file_report, "Compute result", raise_on_exception=True):
+                raise UnitException("known fail point")
 
         with pytest.raises(ProcessException, match="stop process"):
-            with pipeline_file(report, "outputs/result.json", file_id="result"):
+            with pipeline_file(
+                report,
+                "outputs/process-result.json",
+                file_id="process-result",
+            ):
                 raise ProcessException("stop process")
 
-    step = file_report.steps[0]
+    assert [file.file_id for file in report.files] == [
+        "unit-result",
+        "process-result",
+    ]
+
+    unit_file = report.files[0]
+    assert unit_file.failed
+    step = unit_file.steps[0]
     assert step.failed
     assert "UnitException: known fail point" in step.errors
     assert step.warnings == [
         "suppressed raise_on_exception for UnitException via suppressed_exceptions",
     ]
 
-    recorded_file = report.files[0]
+    recorded_file = report.files[1]
     assert recorded_file.failed
     assert "ProcessException: stop process" in recorded_file.errors
     assert "Unhandled exception while processing file" in recorded_file.errors
