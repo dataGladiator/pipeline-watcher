@@ -386,20 +386,22 @@ set_global_settings(
 )
 ```
 
-By default, `fatal_exceptions` already includes `KeyboardInterrupt` and `SystemExit`. Do not manually restate those unless you are replacing the whole tuple intentionally.
+By default, `fatal_exceptions` already includes `KeyboardInterrupt` and `SystemExit`. Do not manually restate those.
 
-If the project defines an additional process-level exception that should always stop the process, add it to the existing fatal exceptions.
+If the project defines an additional process-level exception that should always stop the process, pass it as a project-level fatal exception with `pipeline_fatal_exceptions`.
 
 ```python
-from pipeline_watcher.settings import current_settings, set_global_settings
-
-base = current_settings()
+from pipeline_watcher.settings import set_global_settings
 
 set_global_settings(
     suppressed_exceptions=(UnitException,),
-    fatal_exceptions=(*base.fatal_exceptions, ProcessException),
+    pipeline_fatal_exceptions=(ProcessException,),
 )
 ```
+
+`pipeline_fatal_exceptions` is added to the built-in system fatal exceptions. The effective `fatal_exceptions` property will still include `KeyboardInterrupt` and `SystemExit`.
+
+`fatal_exceptions=(...)` is supported as a compatibility alias for `pipeline_fatal_exceptions=(...)`, but prefer `pipeline_fatal_exceptions` in new code so the intent is clear and system fatal exceptions are not manually repeated.
 
 With this policy, a `UnitException` raised inside `pipeline_file(...)` or `file_step(...)` is recorded into the report and does not stop the outer process loop.
 
@@ -473,29 +475,23 @@ Context managers accept settings such as:
 ```python
 raise_on_exception=True
 suppressed_exceptions=(...)
-fatal_exceptions=(...)
+pipeline_fatal_exceptions=(...)
 ```
 
 Use these deliberately.
 
-Although settings can be passed to individual context managers, they are inherited through watcher settings context. Treat `suppressed_exceptions` and `fatal_exceptions` as orchestration-level policy unless you have a specific tested reason to override them locally.
+Although settings can be passed to individual context managers, they are inherited through watcher settings context. Treat `suppressed_exceptions` and `pipeline_fatal_exceptions` as orchestration-level policy unless you have a specific tested reason to override them locally.
 
 Recommended rule:
 
 * set `suppressed_exceptions` once at process startup
 * rely on default fatal exceptions for `KeyboardInterrupt` and `SystemExit`
-* add project-specific fatal exceptions by extending the existing `fatal_exceptions` tuple
+* add project-specific fatal exceptions with `pipeline_fatal_exceptions`
 * use independent exception classes for unit-level and process-level failures
 * use `raise_on_exception=True` locally when a failed step should stop the current item
 * do not rely on deeply nested exception-policy overrides unless the behavior is tested and intentional
 
-Future helper idea:
-
-```python
-add_global_fatal_exceptions(ProcessException)
-```
-
-A helper like this would avoid repeating the default fatal exception tuple or manually unpacking `current_settings().fatal_exceptions`.
+`fatal_exceptions=(...)` remains available as a compatibility alias. Prefer `pipeline_fatal_exceptions=(...)` in examples and new code.
 
 ---
 
@@ -756,9 +752,8 @@ When modifying code that uses `pipeline-watcher`, follow these rules:
 12. Prefer independent exception classes such as `UnitException` and `ProcessException`.
 13. Configure `UnitException` as suppressed when one failed unit should not stop the process.
 14. Do not manually restate default fatal exceptions; `KeyboardInterrupt` and `SystemExit` are already fatal by default.
-15. Add project-specific fatal exceptions by extending the current `fatal_exceptions` tuple.
+15. Add project-specific fatal exceptions with `pipeline_fatal_exceptions`.
 16. Wrap known unit-level failures as `UnitException` from the original exception.
 17. Use `raise_on_exception=True` only when a failed step should stop the current item.
 18. Do not manually duplicate failure recording that the context managers already perform.
 19. Avoid nested report creation unless intentionally creating a separate orchestrator report.
-
