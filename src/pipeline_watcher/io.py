@@ -16,11 +16,64 @@ dump_report(path, report)
 """
 
 from __future__ import annotations
+
+import errno
 import json
 import os
-import tempfile
+import secrets
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, TextIO
+
+
+def _create_replace_temp_file(
+    directory: Path,
+    *,
+    encoding: str,
+) -> tuple[TextIO, Path]:
+    """
+    Create a uniquely named temporary file in directory for atomic
+    replacement.
+
+    Unlike tempfile.NamedTemporaryFile, this requests mode 0o666 so the OS
+    applies the process umask exactly as it would for normal file creation via
+    open(path, "w"). The O_EXCL flag prevents accidental reuse of an existing
+    path.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+
+    for _ in range(100):
+        tmp_path = directory / f".tmp-{secrets.token_hex(16)}"
+        try:
+            fd = os.open(tmp_path, flags, 0o666)
+        except FileExistsError:
+            continue
+
+        return os.fdopen(fd, "w", encoding=encoding), tmp_path
+
+    raise FileExistsError(
+        errno.EEXIST,
+        "could not create a unique temporary file",
+        str(directory),
+    )
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    """
+    Best-effort fsync of the parent directory.
+
+    This improves durability of the rename on POSIX filesystems. Some
+    platforms
+    do not support opening or fsyncing directories, so failures are ignored.
+    """
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
+    except (AttributeError, NotImplementedError, OSError):
+        return
+
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def atomic_write_json(
@@ -34,46 +87,44 @@ def atomic_write_json(
     Write a JSON object atomically to disk.
 
     A temporary file is created in the same directory as the target file,
-    written to in full, flushed + fsynced, and then atomically renamed to
-    the final path via os.replace.
+    written fully, flushed, fsynced, and then atomically renamed to the final
+    path via os.replace.
+
+    For newly-created output files, permissions match normal open(path, "w")
+    behavior: the file is created with requested mode 0o666, filtered by the
+    process umask. This avoids tempfile.NamedTemporaryFile's usual private
+    0o600 permissions, which can break shared-filesystem readers.
+
+    Existing target files are replaced by a new inode. Permission bits are not
+    copied from an existing target file; this function intentionally uses
+    normal
+    new-file creation permissions.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_path: Path | None = None
+
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            delete=False,
-            dir=path.parent,
+        tmp, tmp_path = _create_replace_temp_file(
+            path.parent,
             encoding=encoding,
-        ) as tmp:
-            tmp_path = Path(tmp.name)
-            json.dump(data, tmp, indent=indent, ensure_ascii=False, default=str)
+        )
+
+        with tmp:
+            json.dump(data, tmp, indent=indent, ensure_ascii=False,
+                      default=str)
             tmp.flush()
             os.fsync(tmp.fileno())
 
         os.replace(tmp_path, path)
-
-        # Optional: fsync directory entry for extra durability on POSIX
-        # (Windows doesn't support fsync on directories)
-        try:
-            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
-        except (AttributeError, NotImplementedError, OSError):
-            dir_fd = None
-        if dir_fd is not None:
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+        _fsync_parent_directory(path)
 
     finally:
-        # If something failed before os.replace, clean up temp file
         if tmp_path is not None and tmp_path.exists():
             try:
                 tmp_path.unlink()
             except OSError:
                 pass
-
 
 
 def dump_report(path: Path, report) -> None:
