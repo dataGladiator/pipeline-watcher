@@ -45,6 +45,15 @@ from dataclasses import dataclass, field, fields, replace
 from typing import Iterable, Optional, Tuple, Type
 
 
+__all__ = [
+    "WatcherSettings",
+    "current_settings",
+    "use_settings",
+    "with_overrides",
+    "set_global_settings",
+]
+
+
 _SYSTEM_FATAL_EXCEPTIONS: Tuple[Type[BaseException], ...] = (
     KeyboardInterrupt,
     SystemExit,
@@ -204,14 +213,6 @@ class WatcherSettings:
             )
         return None
 
-__all__ = [
-    "WatcherSettings",
-    "current_settings",
-    "use_settings",
-    "with_overrides",
-    "set_global_settings",
-]
-
 
 def _normalize_exception_types(
     value: (
@@ -308,6 +309,7 @@ def current_settings() -> WatcherSettings:
     True
     """
     return _settings_var.get(_default_settings)
+
 
 class use_settings:
     """
