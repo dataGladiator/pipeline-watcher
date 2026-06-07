@@ -34,3 +34,5 @@ pw-summary = "pipeline_watcher.cli_report_summary:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pipeline_watcher"]
 
+[tool.setuptools.package-data]
+pipeline_watcher = ["py.typed"]
