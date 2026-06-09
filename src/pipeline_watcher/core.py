@@ -298,6 +298,36 @@ class PipelineReport(BaseModel):
         # Fallback: incomplete
         return Status.PENDING
 
+    @property
+    def ok(self) -> bool:
+        """Truthiness of success over batch steps and file reports.
+
+        Returns
+        -------
+        bool
+            ``False`` if any batch step or file report has failed or has errors.
+            Otherwise, ``all(unit.ok for unit in units)`` over batch steps and
+            file reports, or ``True`` if no units have been recorded yet.
+
+        Notes
+        -----
+        This is a live "OK so far" predicate. It is not the same as
+        ``status == Status.SUCCEEDED`` because a report can be pending or running
+        and still be OK so far.
+        """
+        units: list[ReportBase] = []
+        units.extend(self.steps)
+        units.extend(self.files)
+
+        if not units:
+            return True
+
+        # Failure/errors win.
+        if any(u.status.failed or u.errors for u in units):
+            return False
+
+        return all(u.ok for u in units)
+
     @classmethod
     def from_file(cls, path: Path | str) -> Self:
         """Hydrate a saved pipeline report JSON artifact.
