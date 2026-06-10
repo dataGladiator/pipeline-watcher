@@ -11,7 +11,7 @@ import os
 from typing import Any, Dict, Iterable, List, Optional, Literal, Mapping, Protocol, TypeVar, Self
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-import time, traceback, contextvars, warnings
+import traceback, contextvars, warnings
 from io import StringIO
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from enum import StrEnum, auto
@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from dataclasses import fields
 import mimetypes
+from threading import RLock
 
 # third party import
 from pydantic import (
@@ -257,6 +258,12 @@ class PipelineReport(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     steps: List[StepReport] = Field(default_factory=list)
     files: List[FileReport] = Field(default_factory=list)
+    _lock: RLock = PrivateAttr(default_factory=RLock)
+
+    @contextmanager
+    def locked(self):
+        with self._lock:
+            yield
 
     @computed_field
     @property
@@ -530,20 +537,22 @@ class PipelineReport(BaseModel):
         self.set_progress(self.stage or "steps", pct, self.message or "")
 
     def save(
-            self,
-            path: Path | str | None = None,
-            *,
-            ensure_dir: bool = True,  # can be ignored since atomic_write_json ensures it
-            indent: int = 2,
-            encoding: str = "utf-8",
+        self,
+        path: Path | str | None = None,
+        *,
+        indent: int = 2,
+        encoding: str = "utf-8",
     ) -> None:
-        target = Path(path or self.output_path or "reports/progress.json")
-        atomic_write_json(
-            target,
-            self.model_dump(mode="json"),
-            indent=indent,
-            encoding=encoding,
-        )
+        with self._lock:
+            output_path = path or self.output_path
+            if output_path:
+                target = Path(output_path)
+                atomic_write_json(
+                    target,
+                    self.model_dump(mode="json"),
+                    indent=indent,
+                    encoding=encoding,
+                )
 
     def set_progress(self, stage: str, percent: int, message: str = "") -> None:
         """Update the progress banner and timestamp.
@@ -1225,6 +1234,58 @@ class FileReport(ReportBase):
         return cls(path=Path(path),
                    file_id=file_id,
                    metadata=dict(metadata) if metadata else {}).start()
+
+    def save(
+        self,
+        *,
+        indent: int = 2,
+        encoding: str = "utf-8",
+    ) -> None:
+        """
+        Save the parent PipelineReport snapshot.
+
+        The entire PipelineReport's contents, including this FileReport if it was
+        attached via pipeline_file or by another method, is written to file.
+        To save to another path, call self._pipeline.save directly.
+        """
+        if self._pipeline is not None:
+            self._pipeline.save(
+                indent=indent,
+                encoding=encoding,
+            )
+
+    def save_snapshot(
+        self,
+        path: Path | str,
+        *,
+        indent: int = 2,
+        encoding: str = "utf-8",
+    ) -> None:
+        """
+        Save this FileReport as a standalone snapshot.
+
+        FileReport does not own an output path; an explicit path must be provided.
+        The saved JSON only includes this FileReport.
+        """
+        target = Path(path)
+
+        if self._pipeline is not None:
+            with self._pipeline.locked():
+                atomic_write_json(
+                    target,
+                    self.model_dump(mode="json"),
+                    indent=indent,
+                    encoding=encoding,
+                )
+            return
+
+        atomic_write_json(
+            target,
+            self.model_dump(mode="json"),
+            indent=indent,
+            encoding=encoding,
+        )
+
 
     @computed_field
     @property
