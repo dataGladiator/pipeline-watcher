@@ -2102,18 +2102,21 @@ def file_step(
     """
     Context manager for a step inside a FileReport, governed by WatcherSettings.
 
-    The StepReport is attached to the FileReport on enter so pipeline snapshots
-    taken during the block can show the step as running or otherwise in progress.
+    The StepReport is kept local to this context while user work is running.
+    It is finalized and appended to the FileReport on exit. If the FileReport
+    is attached to a PipelineReport, the append/finalize/save sequence is
+    performed while holding the parent pipeline lock.
 
     Pass any WatcherSettings fields as kwargs. They apply only within this
     context; otherwise current settings are used.
 
     Thread Safety
     -------------
-    If the FileReport is attached to a PipelineReport, mutations to the
-    StepReport, FileReport, or parent PipelineReport are performed while holding
-    the parent pipeline lock. The user's work inside the context block is not
-    executed under the pipeline lock.
+    - The user's work inside the context block is not executed under the
+      pipeline lock.
+    - The StepReport is not part of the shared PipelineReport tree until exit.
+    - Exit-time mutation of the FileReport and PipelineReport snapshots is
+      protected by the parent pipeline lock when available.
     """
     settings_overrides = {
         k: v for k, v in other_options.items() if k in _SETTINGS_KEYS
@@ -2122,22 +2125,6 @@ def file_step(
     with use_settings(**settings_overrides) as settings:
         st = StepReport.begin(label, id=id)
         pipeline = file_report._pipeline
-
-        # Attach on enter so in-progress pipeline snapshots include this step.
-        # Do not use append_step here; append_step finalizes the step.
-        if pipeline is not None:
-            with pipeline.locked():
-                file_report.attach_step(st)
-
-                if pipeline.output_path is not None:
-                    try:
-                        pipeline.save()
-                    except Exception as save_err:
-                        st.warnings.append(
-                            f"pipeline step-enter autosave failed: {save_err!r}"
-                        )
-        else:
-            file_report.attach_step(st)
 
         stdout_buf = StringIO() if settings.capture_streams else None
         stderr_buf = StringIO() if settings.capture_streams else None
@@ -2164,57 +2151,31 @@ def file_step(
                 encountered_exception = True
                 is_supp = settings.is_suppressed(e)
 
-                if pipeline is not None:
-                    with pipeline.locked():
-                        st.errors.append(exception_summary(e))
+                st.errors.append(exception_summary(e))
 
-                        if settings.store_traceback:
-                            tb = "".join(
-                                traceback.format_exception(
-                                    type(e),
-                                    e,
-                                    e.__traceback__,
-                                    limit=settings.traceback_limit,
-                                )
-                            )
-                            if tb:
-                                st.metadata["traceback"] = tb
-
-                        st.fail(
-                            "Handled exception (suppressed)"
-                            if is_supp
-                            else "Unhandled exception while running file step"
+                if settings.store_traceback:
+                    tb = "".join(
+                        traceback.format_exception(
+                            type(e),
+                            e,
+                            e.__traceback__,
+                            limit=settings.traceback_limit,
                         )
-                else:
-                    st.errors.append(exception_summary(e))
-
-                    if settings.store_traceback:
-                        tb = "".join(
-                            traceback.format_exception(
-                                type(e),
-                                e,
-                                e.__traceback__,
-                                limit=settings.traceback_limit,
-                            )
-                        )
-                        if tb:
-                            st.metadata["traceback"] = tb
-
-                    st.fail(
-                        "Handled exception (suppressed)"
-                        if is_supp
-                        else "Unhandled exception while running file step"
                     )
+                    if tb:
+                        st.metadata["traceback"] = tb
+
+                st.fail(
+                    "Handled exception (suppressed)"
+                    if is_supp
+                    else "Unhandled exception while running file step"
+                )
 
                 if settings.should_raise(e):
                     raise
 
                 if (msg := settings.suppression_breadcrumb(e)):
-                    if pipeline is not None:
-                        with pipeline.locked():
-                            st.warnings.append(msg)
-                    else:
-                        st.warnings.append(msg)
+                    st.warnings.append(msg)
 
             finally:
                 if pipeline is not None:
@@ -2231,10 +2192,12 @@ def file_step(
                                 for w in warn_list
                             ]
 
-                        # Finalize already-attached step. Do not append again.
-                        file_report.finalize_attached_step(st)
+                        # Finalize and attach the step to the shared report tree.
+                        # append_step calls st.end(), enforces id uniqueness,
+                        # updates timestamps, recomputes percent, and rolls up review.
+                        file_report.append_step(st)
 
-                        # Step snapshot after finalization
+                        # Step snapshot after append_step finalization.
                         if step_save_to is not None:
                             try:
                                 atomic_write_json(
@@ -2248,7 +2211,7 @@ def file_step(
                                     f"step report save failed: {save_err!r}"
                                 )
 
-                        # Additional pipeline copy
+                        # Additional pipeline copy.
                         if pipeline_save_to is not None:
                             try:
                                 pipeline.save(pipeline_save_to)
@@ -2257,7 +2220,7 @@ def file_step(
                                     f"pipeline save_to failed: {save_err!r}"
                                 )
 
-                        # Canonical autosave
+                        # Canonical autosave.
                         if pipeline.output_path is not None:
                             try:
                                 pipeline.save()
@@ -2266,7 +2229,7 @@ def file_step(
                                     f"pipeline autosave failed: {save_err!r}"
                                 )
 
-                        # Best-effort save-on-exception to override path only
+                        # Best-effort save-on-exception to override path only.
                         if (
                             encountered_exception
                             and settings.save_on_exception
@@ -2297,7 +2260,7 @@ def file_step(
                             for w in warn_list
                         ]
 
-                    file_report.finalize_attached_step(st)
+                    file_report.append_step(st)
 
                     if step_save_to is not None:
                         try:
