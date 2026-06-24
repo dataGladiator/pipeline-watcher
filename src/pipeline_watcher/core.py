@@ -389,6 +389,17 @@ class PipelineReport(BaseModel):
         self.updated_at = _now()
         return self
 
+    def attach_file(self, fr: FileReport) -> "PipelineReport":
+        """Attach a FileReport without finalizing it; update ``updated_at``.
+
+        This is intended for context managers that want live snapshots to show
+        files as running while work is in progress.
+        """
+        fr._pipeline = self
+        self.files.append(fr)
+        self.updated_at = _now()
+        return self
+
     def append_step(self, step: StepReport) -> "PipelineReport":
         """Finalize and append a batch-level step; update ``updated_at``.
 
@@ -403,6 +414,19 @@ class PipelineReport(BaseModel):
             Self (chainable).
         """
         step.end()
+        if step.id is None or not step.id:
+            step.id = construct_unique_step_id_from_label(step.label, self.steps)
+        step.id = make_step_id_unique(step.id, self.steps)
+        self.steps.append(step)
+        self.updated_at = _now()
+        return self
+
+    def attach_step(self, step: StepReport) -> "PipelineReport":
+        """Attach a batch-level StepReport without finalizing it; update ``updated_at``.
+
+        This is intended for context managers that want live snapshots to show
+        batch steps as running while work is in progress.
+        """
         if not step.id:
             step.id = construct_unique_step_id_from_label(step.label, self.steps)
         step.id = make_step_id_unique(step.id, self.steps)
@@ -1947,7 +1971,7 @@ def pipeline_file(
         # Attach on enter so in-progress pipeline snapshots include this file.
         # Keep this block small: protect watcher state, not user work.
         with pr.locked():
-            pr.append_file(fr)
+            pr.attach_file(fr)
 
             if set_stage_on_enter:
                 pr.set_progress(
