@@ -54,7 +54,7 @@ __all__ = [
 ]
 
 
-_SYSTEM_FATAL_EXCEPTIONS: Tuple[Type[BaseException], ...] = (
+_DEFAULT_FATAL_EXCEPTIONS: Tuple[Type[BaseException], ...] = (
     KeyboardInterrupt,
     SystemExit,
 )
@@ -114,7 +114,7 @@ class WatcherSettings:
     pipeline_fatal_exceptions : tuple of Exception types, default ()
         User/project-level fatal exceptions. These are added to system fatal
         exceptions.
-    _system_fatal_exceptions : tuple of Exception types
+    _default_fatal_exceptions : tuple of Exception types
         System fatal exceptions. Defaults should usually preserve
         ``KeyboardInterrupt`` and ``SystemExit`` behavior.
 
@@ -148,13 +148,13 @@ class WatcherSettings:
     suppressed_exceptions: Optional[Tuple[Type[BaseException], ...]] = None
 
     # User/project fatal exceptions.
-    # These are added to _system_fatal_exceptions.
+    # These are added to _default_fatal_exceptions.
     pipeline_fatal_exceptions: Tuple[Type[BaseException], ...] = ()
 
     # System fatal exceptions.
     # Override only if you intentionally want to change interrupt/exit behavior.
-    _system_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
-        default=_SYSTEM_FATAL_EXCEPTIONS,
+    _default_fatal_exceptions: Tuple[Type[BaseException], ...] = field(
+        default=_DEFAULT_FATAL_EXCEPTIONS,
         repr=False,
     )
 
@@ -172,7 +172,7 @@ class WatcherSettings:
         Fatal exceptions are always raised and never suppressed.
         """
         return _dedupe_exception_types(
-            self._system_fatal_exceptions,
+            self._default_fatal_exceptions,
             self.pipeline_fatal_exceptions,
         )
 
@@ -263,7 +263,7 @@ def _normalize_settings_overrides(overrides: dict) -> dict:
     for key in (
         "suppressed_exceptions",
         "pipeline_fatal_exceptions",
-        "_system_fatal_exceptions",
+        "_default_fatal_exceptions",
     ):
         if key in overrides:
             overrides[key] = _normalize_exception_types(
